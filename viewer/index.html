@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Trigger Replay Viewer</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .container {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      max-width: 600px;
+      width: 100%;
+      overflow: hidden;
+    }
+
+    .header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 30px 20px;
+      text-align: center;
+    }
+
+    .header h1 {
+      font-size: 28px;
+      margin-bottom: 5px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+    }
+
+    .header p {
+      font-size: 14px;
+      opacity: 0.9;
+    }
+
+    .content {
+      padding: 30px 20px;
+    }
+
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    .form-group label {
+      display: block;
+      font-weight: 500;
+      margin-bottom: 8px;
+      color: #333;
+      font-size: 14px;
+    }
+
+    .form-group input,
+    .form-group textarea {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #e0e0e0;
+      border-radius: 6px;
+      font-family: 'Monaco', 'Menlo', monospace;
+      font-size: 13px;
+      transition: border-color 0.2s;
+    }
+
+    .form-group textarea {
+      min-height: 150px;
+      resize: vertical;
+    }
+
+    .form-group input:focus,
+    .form-group textarea:focus {
+      outline: none;
+      border-color: #667eea;
+      box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+    }
+
+    .buttons {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+
+    .btn {
+      flex: 1;
+      padding: 12px 20px;
+      border: none;
+      border-radius: 6px;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 14px;
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .btn-secondary {
+      background: #f0f0f0;
+      color: #333;
+      border: 1px solid #e0e0e0;
+    }
+
+    .btn-secondary:hover {
+      background: #e8e8e8;
+    }
+
+    .message {
+      padding: 15px;
+      border-radius: 6px;
+      margin-bottom: 20px;
+      font-size: 14px;
+      display: none;
+    }
+
+    .message.show {
+      display: block;
+    }
+
+    .message.error {
+      background: #ffebee;
+      color: #c62828;
+      border: 1px solid #ffcdd2;
+    }
+
+    .message.success {
+      background: #e8f5e9;
+      color: #2e7d32;
+      border: 1px solid #c8e6c9;
+    }
+
+    .message.info {
+      background: #e3f2fd;
+      color: #1565c0;
+      border: 1px solid #bbdefb;
+    }
+
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid #e0e0e0;
+      margin-bottom: 20px;
+    }
+
+    .tab-btn {
+      flex: 1;
+      padding: 12px;
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-weight: 500;
+      color: #666;
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s;
+    }
+
+    .tab-btn.active {
+      color: #667eea;
+      border-bottom-color: #667eea;
+    }
+
+    .tab-content {
+      display: none;
+    }
+
+    .tab-content.active {
+      display: block;
+    }
+
+    .preview {
+      background: #f8f9fa;
+      padding: 15px;
+      border-radius: 6px;
+      border: 1px solid #e0e0e0;
+      font-size: 13px;
+      color: #666;
+      max-height: 200px;
+      overflow-y: auto;
+      font-family: 'Monaco', 'Menlo', monospace;
+    }
+
+    .preview pre {
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .workflow-summary {
+      background: #f8f9fa;
+      padding: 15px;
+      border-radius: 6px;
+      border: 1px solid #e0e0e0;
+      font-size: 14px;
+    }
+
+    .summary-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid #e0e0e0;
+    }
+
+    .summary-row:last-child {
+      border-bottom: none;
+    }
+
+    .summary-label {
+      font-weight: 500;
+      color: #333;
+    }
+
+    .summary-value {
+      color: #667eea;
+      font-weight: 600;
+    }
+
+    .step-list {
+      margin-top: 15px;
+    }
+
+    .step-item {
+      padding: 12px;
+      background: white;
+      border: 1px solid #e0e0e0;
+      border-radius: 6px;
+      margin-bottom: 10px;
+      font-size: 13px;
+    }
+
+    .step-type {
+      display: inline-block;
+      padding: 2px 8px;
+      background: #667eea;
+      color: white;
+      border-radius: 3px;
+      font-weight: 600;
+      font-size: 11px;
+      margin-right: 8px;
+    }
+
+    .step-detail {
+      margin-top: 8px;
+      color: #666;
+      font-family: 'Monaco', 'Menlo', monospace;
+      font-size: 12px;
+    }
+
+    .step-target {
+      margin-top: 8px;
+      padding: 8px 12px;
+      background: #f8f9fa;
+      border-left: 3px solid #667eea;
+      border-radius: 3px;
+      font-size: 12px;
+    }
+
+    .step-target-key {
+      font-weight: 600;
+      color: #333;
+    }
+
+    .step-target-value {
+      color: #666;
+      word-break: break-all;
+    }
+
+    .info-box {
+      background: #e3f2fd;
+      border-left: 4px solid #2196F3;
+      padding: 15px;
+      border-radius: 6px;
+      font-size: 13px;
+      line-height: 1.6;
+      color: #1565c0;
+    }
+
+    .info-box strong {
+      display: block;
+      margin-bottom: 8px;
+    }
+
+    .file-upload-area {
+      border: 2px dashed #e0e0e0;
+      border-radius: 6px;
+      padding: 30px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .file-upload-area:hover {
+      border-color: #667eea;
+      background: #f8f7ff;
+    }
+
+    .file-upload-area.dragging {
+      border-color: #667eea;
+      background: #f0e6ff;
+    }
+
+    .file-upload-area input {
+      display: none;
+    }
+
+    .file-upload-icon {
+      font-size: 40px;
+      margin-bottom: 10px;
+    }
+
+    .file-upload-text {
+      color: #666;
+      font-size: 14px;
+      margin-bottom: 5px;
+    }
+
+    .file-upload-hint {
+      color: #999;
+      font-size: 12px;
+    }
+
+    .alert {
+      padding: 15px;
+      border-radius: 6px;
+      margin-bottom: 20px;
+      font-size: 14px;
+      display: none;
+    }
+
+    .alert.show {
+      display: block;
+    }
+
+    .alert-warning {
+      background: #fff3cd;
+      color: #856404;
+      border: 1px solid #ffeaa7;
+    }
+
+    .close-btn {
+      float: right;
+      cursor: pointer;
+      font-size: 20px;
+      line-height: 1;
+      opacity: 0.7;
+    }
+
+    .close-btn:hover {
+      opacity: 1;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>⚡ Trigger Replay Viewer</h1>
+      <p>Load and execute Trigger workflows</p>
+    </div>
+
+    <div class="content">
+      <div id="message" class="message"></div>
+      <div id="alert" class="alert"></div>
+
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="upload">Upload</button>
+        <button class="tab-btn" data-tab="editor">Paste JSON</button>
+        <button class="tab-btn" data-tab="preview">Preview</button>
+      </div>
+
+      <!-- Upload Tab -->
+      <div id="upload" class="tab-content active">
+        <div class="file-upload-area" id="fileUploadArea">
+          <div class="file-upload-icon">📁</div>
+          <div class="file-upload-text">Drag and drop your JSON file here</div>
+          <div class="file-upload-hint">or click to browse</div>
+          <input type="file" id="fileInput" accept=".json">
+        </div>
+        <div style="margin-top: 20px;">
+          <button class="btn btn-primary" id="btnLoadFromUrl">Load from URL Parameter</button>
+        </div>
+      </div>
+
+      <!-- Editor Tab -->
+      <div id="editor" class="tab-content">
+        <div class="form-group">
+          <label>Paste your Trigger workflow JSON:</label>
+          <textarea id="jsonInput" placeholder='{ "id": "...", "name": "...", "startUrl": "...", "steps": [...], ... }'></textarea>
+        </div>
+        <button class="btn btn-primary" id="btnParseJson">Parse JSON</button>
+      </div>
+
+      <!-- Preview Tab -->
+      <div id="preview" class="tab-content">
+        <div id="previewContent" style="display: none;">
+          <div class="workflow-summary" id="workflowSummary"></div>
+          <div class="step-list" id="stepList"></div>
+          <div style="margin-top: 20px;">
+            <button class="btn btn-primary" id="btnExecuteWorkflow" style="display: none;">▶ Execute on This Page</button>
+            <button class="btn btn-secondary" id="btnOpenInNewTab">↗ Open Start URL in New Tab</button>
+          </div>
+        </div>
+        <div id="previewEmpty" class="info-box">
+          Load a workflow to see a preview of the steps and execution plan.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="viewer.js"></script>
+</body>
+</html>
