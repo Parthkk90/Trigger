@@ -1,0 +1,8 @@
+node_modules/
+.env
+.env.*
+!.env.example
+backend/data/
+*.log
+.DS_Store
+.vscode/
