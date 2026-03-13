@@ -1,0 +1,51 @@
+{
+  "manifest_version": 3,
+  "name": "Trigger",
+  "version": "0.1.0",
+  "description": "Record browser workflows and replay them anywhere",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "content/fingerprint.js",
+        "content/overlay.js",
+        "content/recorder.js",
+        "content/replay.js",
+        "content/injector.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["overlay/*", "icons/*"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
