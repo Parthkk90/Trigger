@@ -3,35 +3,12 @@ const cors = require('@fastify/cors');
 const { customAlphabet } = require('nanoid');
 const { Pool } = require('pg');
 
-const app = Fastify({ logger: true });
-const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 10);
-
-const PORT = Number(process.env.PORT || 8787);
-const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
-const DATABASE_URL = process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/flowlink';
-const EXTENSION_INSTALL_URL = process.env.EXTENSION_INSTALL_URL || 'https://chromewebstore.google.com/';
-
-const pool = new Pool({
-  connectionString: DATABASE_URL,
-});
-
-// Initializes the minimal production-safe schema.
-async function ensureSchema() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS workflows (
-      id TEXT PRIMARY KEY,
-      slug TEXT UNIQUE NOT NULL,
-      name TEXT NOT NULL,
-      start_url TEXT,
-      data JSONB NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-  `);
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_workflows_slug ON workflows(slug);
-  `);
-}
+const DEFAULT_PORT = Number(process.env.PORT || 8787);
+const DEFAULT_BASE_URL = process.env.BASE_URL || `http://localhost:${DEFAULT_PORT}`;
+const DEFAULT_DATABASE_URL =
+  process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/flowlink';
+const DEFAULT_EXTENSION_INSTALL_URL =
+  process.env.EXTENSION_INSTALL_URL || 'https://chromewebstore.google.com/';
 
 function validateWorkflow(workflow) {
   if (!workflow || typeof workflow !== 'object') return 'workflow must be an object';
@@ -41,115 +18,131 @@ function validateWorkflow(workflow) {
   return null;
 }
 
-app.register(cors, {
-  origin: true,
-});
+function createRateLimiter() {
+  const store = new Map();
+  const windowMs = 60 * 1000;
+  const maxRequests = 100;
 
-app.get('/health', async () => ({ ok: true }));
+  // Per-IP in-memory limiter for share endpoint hardening.
+  return function checkRateLimit(ip) {
+    const now = Date.now();
+    const key = ip || 'unknown';
+    const record = store.get(key) || { count: 0, resetAt: now + windowMs };
 
-// Fetches one workflow by ID.
-async function getWorkflowById(id) {
-  const result = await pool.query(
-    `SELECT id, slug, data, created_at, updated_at FROM workflows WHERE id = $1`,
-    [id]
-  );
-  return result.rows[0] || null;
-}
+    if (now > record.resetAt) {
+      record.count = 0;
+      record.resetAt = now + windowMs;
+    }
 
-// Fetches one workflow by share slug.
-async function getWorkflowBySlug(slug) {
-  const result = await pool.query(
-    `SELECT id, slug, data, created_at, updated_at FROM workflows WHERE slug = $1`,
-    [slug]
-  );
-  return result.rows[0] || null;
-}
+    record.count += 1;
+    store.set(key, record);
 
-// Creates or updates a workflow while preserving existing slug on update.
-async function upsertWorkflow(workflow) {
-  const existing = await getWorkflowById(workflow.id);
-  const nowIso = new Date().toISOString();
-  const startUrl = workflow.startUrl || null;
-  const name = workflow.name;
-  const data = {
-    ...workflow,
-    createdAt: workflow.createdAt || Date.now(),
-    updatedAt: Date.now(),
+    return {
+      allowed: record.count <= maxRequests,
+      limit: maxRequests,
+      remaining: Math.max(0, maxRequests - record.count),
+      resetAt: record.resetAt,
+      windowMs,
+    };
   };
+}
 
-  if (existing) {
-    const updated = await pool.query(
-      `
-      UPDATE workflows
-      SET name = $2, start_url = $3, data = $4::jsonb, updated_at = $5
-      WHERE id = $1
-      RETURNING id, slug
-      `,
-      [workflow.id, name, startUrl, JSON.stringify(data), nowIso]
-    );
-    return updated.rows[0];
+function createWorkflowRepository({ pool, nanoid }) {
+  async function ensureSchema() {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS workflows (
+        id TEXT PRIMARY KEY,
+        slug TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL,
+        start_url TEXT,
+        data JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_workflows_slug ON workflows(slug);
+    `);
   }
 
-  let slug = nanoid();
-  while (true) {
-    try {
-      const inserted = await pool.query(
+  async function getWorkflowById(id) {
+    const result = await pool.query(
+      `SELECT id, slug, data, created_at, updated_at FROM workflows WHERE id = $1`,
+      [id]
+    );
+    return result.rows[0] || null;
+  }
+
+  async function getWorkflowBySlug(slug) {
+    const result = await pool.query(
+      `SELECT id, slug, data, created_at, updated_at FROM workflows WHERE slug = $1`,
+      [slug]
+    );
+    return result.rows[0] || null;
+  }
+
+  // Creates or updates a workflow while preserving existing slug on update.
+  async function upsertWorkflow(workflow) {
+    const existing = await getWorkflowById(workflow.id);
+    const nowIso = new Date().toISOString();
+    const startUrl = workflow.startUrl || null;
+    const name = workflow.name;
+    const data = {
+      ...workflow,
+      createdAt: workflow.createdAt || Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    if (existing) {
+      const updated = await pool.query(
         `
-        INSERT INTO workflows (id, slug, name, start_url, data, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
+        UPDATE workflows
+        SET name = $2, start_url = $3, data = $4::jsonb, updated_at = $5
+        WHERE id = $1
         RETURNING id, slug
         `,
-        [workflow.id, slug, name, startUrl, JSON.stringify(data), nowIso, nowIso]
+        [workflow.id, name, startUrl, JSON.stringify(data), nowIso]
       );
-      return inserted.rows[0];
-    } catch (err) {
-      if (err.code === '23505') {
-        slug = nanoid();
-        continue;
+      return updated.rows[0];
+    }
+
+    let slug = nanoid();
+    while (true) {
+      try {
+        const inserted = await pool.query(
+          `
+          INSERT INTO workflows (id, slug, name, start_url, data, created_at, updated_at)
+          VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
+          RETURNING id, slug
+          `,
+          [workflow.id, slug, name, startUrl, JSON.stringify(data), nowIso, nowIso]
+        );
+        return inserted.rows[0];
+      } catch (err) {
+        if (err.code === '23505') {
+          slug = nanoid();
+          continue;
+        }
+        throw err;
       }
-      throw err;
     }
   }
+
+  return {
+    ensureSchema,
+    getWorkflowById,
+    getWorkflowBySlug,
+    upsertWorkflow,
+  };
 }
 
-// Create workflow and share slug.
-app.post('/api/workflows', async (request, reply) => {
-  const workflow = request.body;
-  const error = validateWorkflow(workflow);
-  if (error) return reply.code(400).send({ error });
-
-  const saved = await upsertWorkflow(workflow);
-
-  return {
-    workflowId: saved.id,
-    slug: saved.slug,
-    shareUrl: `${BASE_URL}/l/${saved.slug}`,
-  };
-});
-
-app.get('/api/workflows/:id', async (request, reply) => {
-  const row = await getWorkflowById(request.params.id);
-  if (!row) return reply.code(404).send({ error: 'workflow not found' });
-  return row.data;
-});
-
-app.get('/api/links/:slug', async (request, reply) => {
-  const row = await getWorkflowBySlug(request.params.slug);
-  if (!row) return reply.code(404).send({ error: 'link not found' });
-  return {
-    slug: row.slug,
-    workflow: row.data,
-  };
-});
-
-// Slug resolver page.
-app.get('/l/:slug', async (request, reply) => {
-  const slug = request.params.slug;
-  const html = `<!doctype html>
+function createSlugResolverHtml({ slug, extensionInstallUrl, cspConnectOrigin }) {
+  return `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ${cspConnectOrigin};">
   <title>FlowLink Replay</title>
   <style>
     body { font-family: sans-serif; margin: 0; padding: 24px; background: #f7fafc; color: #1f2937; }
@@ -174,7 +167,7 @@ app.get('/l/:slug', async (request, reply) => {
 
     <div id="installPrompt" class="hidden">
       <p class="hint">FlowLink extension is not detected in this browser.</p>
-      <a class="btn" href="${EXTENSION_INSTALL_URL}" target="_blank" rel="noreferrer">Install FlowLink Extension</a>
+      <a class="btn" href="${extensionInstallUrl}" target="_blank" rel="noreferrer">Install FlowLink Extension</a>
       <a class="btn secondary" href="/api/links/${slug}" target="_blank" rel="noreferrer">View Workflow JSON</a>
     </div>
   </div>
@@ -186,9 +179,6 @@ app.get('/l/:slug', async (request, reply) => {
     const installPromptEl = document.getElementById('installPrompt');
     const runBtn = document.getElementById('runBtn');
 
-    let hasExtension = false;
-
-    // Detects extension by asking content script to answer a page-level ping.
     function detectExtension(timeoutMs) {
       return new Promise((resolve) => {
         const timer = setTimeout(() => {
@@ -222,7 +212,7 @@ app.get('/l/:slug', async (request, reply) => {
 
     async function start() {
       try {
-        hasExtension = await detectExtension(1500);
+        const hasExtension = await detectExtension(1500);
         if (hasExtension) {
           statusEl.textContent = 'Extension detected. Ready to replay.';
           extensionReadyEl.classList.remove('hidden');
@@ -252,13 +242,112 @@ app.get('/l/:slug', async (request, reply) => {
   </script>
 </body>
 </html>`;
-  reply.type('text/html').send(html);
-});
+}
 
-ensureSchema()
-  .then(() => app.listen({ port: PORT, host: '0.0.0.0' }))
-  .then(() => app.log.info(`FlowLink backend running on ${BASE_URL}`))
-  .catch((err) => {
-    app.log.error(err);
+function createApp(options = {}) {
+  const port = Number(options.port || DEFAULT_PORT);
+  const baseUrl = options.baseUrl || DEFAULT_BASE_URL;
+  const databaseUrl = options.databaseUrl || DEFAULT_DATABASE_URL;
+  const extensionInstallUrl = options.extensionInstallUrl || DEFAULT_EXTENSION_INSTALL_URL;
+  const logger = options.logger !== undefined ? options.logger : true;
+
+  const app = Fastify({ logger });
+  const pool =
+    options.pool ||
+    new Pool({
+      connectionString: databaseUrl,
+    });
+
+  const nanoid = options.nanoid || customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 10);
+  const repository = createWorkflowRepository({ pool, nanoid });
+  const checkRateLimit = createRateLimiter();
+  const cspConnectOrigin = new URL(baseUrl).origin;
+
+  app.register(cors, {
+    origin: true,
+  });
+
+  app.get('/health', async () => ({ ok: true }));
+
+  app.post('/api/workflows', async (request, reply) => {
+    const limit = checkRateLimit(request.ip);
+    reply.header('X-RateLimit-Limit', String(limit.limit));
+    reply.header('X-RateLimit-Remaining', String(limit.remaining));
+    reply.header('X-RateLimit-Reset', String(Math.floor(limit.resetAt / 1000)));
+
+    if (!limit.allowed) {
+      const retryAfter = Math.max(1, Math.ceil((limit.resetAt - Date.now()) / 1000));
+      reply.header('Retry-After', String(retryAfter));
+      return reply.code(429).send({ error: 'rate limit exceeded' });
+    }
+
+    const workflow = request.body;
+    const error = validateWorkflow(workflow);
+    if (error) return reply.code(400).send({ error });
+
+    const saved = repository.upsertWorkflow(workflow);
+
+    return {
+      workflowId: (await saved).id,
+      slug: (await saved).slug,
+      shareUrl: `${baseUrl}/l/${(await saved).slug}`,
+    };
+  });
+
+  app.get('/api/workflows/:id', async (request, reply) => {
+    const row = await repository.getWorkflowById(request.params.id);
+    if (!row) return reply.code(404).send({ error: 'workflow not found' });
+    return row.data;
+  });
+
+  app.get('/api/links/:slug', async (request, reply) => {
+    const row = await repository.getWorkflowBySlug(request.params.slug);
+    if (!row) return reply.code(404).send({ error: 'link not found' });
+    return {
+      slug: row.slug,
+      workflow: row.data,
+    };
+  });
+
+  app.get('/l/:slug', async (request, reply) => {
+    const slug = request.params.slug;
+    const html = createSlugResolverHtml({
+      slug,
+      extensionInstallUrl,
+      cspConnectOrigin,
+    });
+    reply.type('text/html').send(html);
+  });
+
+  return {
+    app,
+    pool,
+    repository,
+    checkRateLimit,
+    validateWorkflow,
+  };
+}
+
+async function startServer() {
+  const { app, repository } = createApp();
+  await repository.ensureSchema();
+  const host = '0.0.0.0';
+  await app.listen({ port: DEFAULT_PORT, host });
+  app.log.info(`FlowLink backend running on ${DEFAULT_BASE_URL}`);
+}
+
+if (require.main === module) {
+  startServer().catch((err) => {
+    console.error(err);
     process.exit(1);
   });
+}
+
+module.exports = {
+  createApp,
+  createRateLimiter,
+  createWorkflowRepository,
+  createSlugResolverHtml,
+  validateWorkflow,
+  startServer,
+};

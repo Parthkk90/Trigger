@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node tests/run-tests.js",
+    "test:backend": "node tests/test-backend.js",
+    "test:all": "npm test && npm run test:backend",
     "backend:start": "node backend/server.js"
   },
   "keywords": [],
