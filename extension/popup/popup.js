@@ -8,6 +8,9 @@ const controls = document.getElementById('controls');
 const statusDot = document.getElementById('status-dot');
 const statusText = document.getElementById('status-text');
 const workflowList = document.getElementById('workflow-list');
+const btnSettings = document.getElementById('btn-settings');
+
+const DEFAULT_BACKEND_URL = 'http://localhost:8787';
 
 let currentState = null;
 
@@ -19,6 +22,7 @@ async function init() {
 
   // Set up event delegation once
   workflowList.addEventListener('click', handleWorkflowAction);
+  btnSettings.addEventListener('click', configureBackendUrl);
 
   await loadWorkflows();
 }
@@ -126,6 +130,10 @@ async function handleWorkflowAction(event) {
   switch (action) {
     case 'play':
       currentState = await sendMessage({ type: 'START_REPLAY', workflowId: id });
+      if (currentState?.error) {
+        alert(`Replay failed: ${currentState.error}`);
+        return;
+      }
       currentState.mode = 'replaying';
       renderControls();
       window.close();
@@ -171,9 +179,10 @@ async function shareWorkflow(id) {
   // Fallback for local-only mode if backend is unavailable.
   if (!shareUrl) {
     const viewerUrl = 'http://localhost:8080';
+    const backendUrl = await getBackendUrl();
     const workflowJson = JSON.stringify(workflow);
     const encoded = encodeURIComponent(workflowJson);
-    shareUrl = `${viewerUrl}?workflow=${encoded}`;
+    shareUrl = `${viewerUrl}?workflow=${encoded}&backend_url=${encodeURIComponent(backendUrl)}`;
   }
 
   // Try to copy to clipboard
@@ -190,6 +199,41 @@ async function shareWorkflow(id) {
 
 function sendMessage(msg) {
   return chrome.runtime.sendMessage(msg);
+}
+
+async function getBackendUrl() {
+  const result = await chrome.storage.sync.get('backendUrl');
+  return sanitizeUrl(result.backendUrl) || DEFAULT_BACKEND_URL;
+}
+
+async function configureBackendUrl() {
+  const current = await getBackendUrl();
+  const entered = window.prompt('Backend URL (origin only):', current);
+  if (entered === null) return;
+
+  const sanitized = sanitizeUrl(entered);
+  if (!sanitized) {
+    alert('Invalid URL. Use http://host:port or https://host');
+    return;
+  }
+
+  const result = await sendMessage({ type: 'SET_BACKEND_URL', backendUrl: sanitized });
+  if (result?.error) {
+    alert(`Failed to save URL: ${result.error}`);
+    return;
+  }
+  alert(`Backend URL saved: ${sanitized}`);
+}
+
+function sanitizeUrl(value) {
+  if (!value || typeof value !== 'string') return null;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    return parsed.origin;
+  } catch (err) {
+    return null;
+  }
 }
 
 function escapeHtml(text) {

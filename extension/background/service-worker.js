@@ -13,7 +13,8 @@ let state = {
   replayIndex: 0,
 };
 
-const API_BASE_URL = 'http://localhost:8787';
+const DEFAULT_API_BASE_URL = 'http://localhost:8787';
+let backendUrlCache = DEFAULT_API_BASE_URL;
 
 // ── MV3 Keepalive ──────────────────────────────────────────────────
 // Service workers die after ~30s of inactivity in MV3.
@@ -48,6 +49,44 @@ async function restoreState() {
       startKeepalive();
     }
   }
+}
+
+// Reads backend URL from sync storage with safe localhost fallback.
+async function getBackendBaseUrl() {
+  if (backendUrlCache && backendUrlCache !== DEFAULT_API_BASE_URL) {
+    return backendUrlCache;
+  }
+  const result = await chrome.storage.sync.get('backendUrl');
+  const configured = sanitizeUrl(result.backendUrl);
+  backendUrlCache = configured || DEFAULT_API_BASE_URL;
+  return backendUrlCache;
+}
+
+function sanitizeUrl(url) {
+  if (!url || typeof url !== 'string') return null;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    return parsed.origin;
+  } catch (err) {
+    return null;
+  }
+}
+
+function validateReplayWorkflow(workflow) {
+  if (!workflow || typeof workflow !== 'object') {
+    return { valid: false, error: 'workflow must be an object' };
+  }
+  if (!workflow.id || typeof workflow.id !== 'string') {
+    return { valid: false, error: 'workflow.id is required' };
+  }
+  if (!Array.isArray(workflow.steps) || workflow.steps.length === 0) {
+    return { valid: false, error: 'workflow.steps must be a non-empty array' };
+  }
+  if (!workflow.startUrl || typeof workflow.startUrl !== 'string') {
+    return { valid: false, error: 'workflow.startUrl is required' };
+  }
+  return { valid: true };
 }
 
 // Restore on startup
@@ -162,6 +201,8 @@ const messageHandlers = {
   'START_REPLAY': async (msg) => {
     const workflow = await loadWorkflow(msg.workflowId);
     if (!workflow) return { error: 'workflow not found' };
+    const validation = validateReplayWorkflow(workflow);
+    if (!validation.valid) return { error: validation.error };
 
     state.mode = 'replaying';
     state.workflowId = msg.workflowId;
@@ -181,9 +222,8 @@ const messageHandlers = {
 
   'START_REPLAY_INLINE': async (msg, sender) => {
     const workflow = msg.workflow;
-    if (!workflow || !Array.isArray(workflow.steps)) {
-      return { error: 'invalid workflow payload' };
-    }
+    const validation = validateReplayWorkflow(workflow);
+    if (!validation.valid) return { error: validation.error };
 
     if (!sender.tab?.id) {
       return { error: 'inline replay requires sender tab' };
@@ -289,6 +329,22 @@ const messageHandlers = {
     await deleteWorkflow(msg.workflowId);
     return { status: 'deleted' };
   },
+
+  'SET_BACKEND_URL': async (msg) => {
+    const sanitized = sanitizeUrl(msg.backendUrl);
+    if (!sanitized) {
+      return { error: 'invalid backend URL' };
+    }
+    backendUrlCache = sanitized;
+    await chrome.storage.sync.set({ backendUrl: sanitized });
+    return { status: 'ok', backendUrl: sanitized };
+  },
+
+  // ── Extension Detection (for viewer page) ──
+  'EXTENSION_PING': async () => {
+    // Simple ping/pong for extension presence detection
+    return { ok: true };
+  },
 };
 
 // ── Workflow Storage (chrome.storage.local) ────────────────────────
@@ -319,7 +375,8 @@ async function deleteWorkflow(id) {
 }
 
 async function uploadWorkflowRemote(workflow) {
-  const response = await fetch(`${API_BASE_URL}/api/workflows`, {
+  const apiBaseUrl = await getBackendBaseUrl();
+  const response = await fetch(`${apiBaseUrl}/api/workflows`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

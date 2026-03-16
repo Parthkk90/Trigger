@@ -11,6 +11,7 @@
 
   var isRecording = false;
   var lastInputElement = null;
+  var lastInputIsSensitive = false;
   var inputBuffer = '';
   var inputDebounceTimer = null;
 
@@ -81,11 +82,13 @@
       (target.name && target.name.toLowerCase().indexOf('password') !== -1) ||
       (target.name && target.name.toLowerCase().indexOf('secret') !== -1);
 
+    lastInputIsSensitive = isSensitive;
+
     inputBuffer = target.value;
 
     clearTimeout(inputDebounceTimer);
     inputDebounceTimer = setTimeout(function () {
-      flushInputBuffer(isSensitive);
+      flushInputBuffer();
     }, 500);
   }
 
@@ -127,9 +130,10 @@
 
   // ── Input Buffering ────────────────────────────────────────────
 
-  function flushInputBuffer(isSensitive) {
+  function flushInputBuffer() {
     if (!lastInputElement || !inputBuffer) {
       lastInputElement = null;
+      lastInputIsSensitive = false;
       inputBuffer = '';
       return;
     }
@@ -137,11 +141,12 @@
     recordStep({
       type: 'input',
       target: window.Trigger.generateFingerprint(lastInputElement),
-      value: isSensitive ? '' : inputBuffer,
-      sensitive: !!isSensitive,
+      value: lastInputIsSensitive ? '' : inputBuffer,
+      sensitive: !!lastInputIsSensitive,
     });
 
     lastInputElement = null;
+    lastInputIsSensitive = false;
     inputBuffer = '';
     clearTimeout(inputDebounceTimer);
   }
