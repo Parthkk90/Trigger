@@ -81,7 +81,15 @@
         break;
 
       case 'SHOW_ASSIST':
-        window.Trigger.showAssistPanel(message.step, message.index, message.total, message.reason);
+        window.Trigger.showAssistPanel({
+          step: message.step,
+          index: message.index,
+          total: message.total,
+          reason: message.reason,
+          reasonType: message.reasonType,
+          retries: message.retries,
+          maxRetries: message.maxRetries,
+        });
         sendResponse({ ok: true });
         break;
 
@@ -120,9 +128,15 @@
     }
 
     window.Trigger.updateProgress(index, total, step);
+    if (typeof window.Trigger.assistAttempting === 'function') {
+      window.Trigger.assistAttempting({ index: index, total: total, step: step });
+    }
 
     window.Trigger.executeStep(step, index, total).then(function (result) {
       if (result.success) {
+        if (typeof window.Trigger.assistResolved === 'function') {
+          window.Trigger.assistResolved({ action: 'step_completed', index: index });
+        }
         return chrome.runtime.sendMessage({
           type: 'STEP_COMPLETED',
           index: index,
@@ -142,6 +156,9 @@
       if (response.type === 'EXECUTE_STEP') {
         handleExecuteStep(response.step, response.index, response.total);
       } else if (response.type === 'REPLAY_COMPLETE') {
+        if (typeof window.Trigger.assistResolved === 'function') {
+          window.Trigger.assistResolved({ action: 'replay_complete', index: index });
+        }
         handleReplayComplete();
       }
       // WAITING_NAVIGATION → do nothing, new page will call REPLAY_READY

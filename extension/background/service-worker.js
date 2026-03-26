@@ -160,6 +160,30 @@ async function maybeRecoverReplay() {
   }
 }
 
+async function getReplayResponseForCompletedIndex(index) {
+  delete state.stepRetries[index];
+  state.replayIndex = index + 1;
+  state.lastReplayProgressAt = Date.now();
+  state.lastReplayHeartbeatAt = Date.now();
+  state.recoveryAttempts = 0;
+  await persistState();
+
+  if (state.replayIndex >= state.steps.length) {
+    state.mode = 'idle';
+    stopKeepalive();
+    await persistState();
+    return { type: 'REPLAY_COMPLETE' };
+  }
+
+  const nextStep = state.steps[state.replayIndex];
+  if (nextStep.type === 'navigate') {
+    chrome.tabs.update(state.activeTabId, { url: nextStep.url });
+    return { type: 'WAITING_NAVIGATION' };
+  }
+
+  return { type: 'EXECUTE_STEP', step: nextStep, index: state.replayIndex, total: state.steps.length };
+}
+
 // Restore on startup
 restoreState();
 
@@ -345,31 +369,7 @@ const messageHandlers = {
 
   'STEP_COMPLETED': async (msg) => {
     if (state.mode !== 'replaying') return { error: 'not replaying' };
-
-    delete state.stepRetries[msg.index];
-    state.replayIndex = msg.index + 1;
-    state.lastReplayProgressAt = Date.now();
-    state.lastReplayHeartbeatAt = Date.now();
-    state.recoveryAttempts = 0;
-    await persistState();
-
-    if (state.replayIndex >= state.steps.length) {
-      state.mode = 'idle';
-      stopKeepalive();
-      await persistState();
-      return { type: 'REPLAY_COMPLETE' };
-    }
-
-    const nextStep = state.steps[state.replayIndex];
-
-    // If next step is on a different URL, navigate there
-    // Content script will send REPLAY_READY when the new page loads
-    if (nextStep.type === 'navigate') {
-      chrome.tabs.update(state.activeTabId, { url: nextStep.url });
-      return { type: 'WAITING_NAVIGATION' };
-    }
-
-    return { type: 'EXECUTE_STEP', step: nextStep, index: state.replayIndex, total: state.steps.length };
+    return await getReplayResponseForCompletedIndex(msg.index);
   },
 
   'STOP_REPLAY': async () => {
@@ -431,9 +431,46 @@ const messageHandlers = {
         index,
         total: state.steps.length,
         reason: `[${reasonType}] ${msg.reason || 'Step failed'}`,
+        reasonType,
+        retries,
+        maxRetries,
       });
     }
     return { status: 'assisting', reasonType, retries, maxRetries };
+  },
+
+  'ASSIST_ACTION': async (msg, sender) => {
+    if (state.mode !== 'replaying') return { error: 'not replaying' };
+    if (sender.tab?.id && sender.tab.id !== state.activeTabId) return { error: 'wrong tab' };
+
+    const index = typeof msg.index === 'number' ? msg.index : state.replayIndex;
+    const action = msg.action;
+
+    if (action === 'retry') {
+      const step = state.steps[index];
+      state.lastReplayHeartbeatAt = Date.now();
+      await persistState();
+
+      if (state.activeTabId) {
+        await chrome.tabs.sendMessage(state.activeTabId, {
+          type: 'EXECUTE_STEP',
+          step,
+          index,
+          total: state.steps.length,
+        });
+      }
+      return { status: 'retrying', index };
+    }
+
+    if (action === 'skip' || action === 'mark_fixed') {
+      const response = await getReplayResponseForCompletedIndex(index);
+      if (state.activeTabId) {
+        await chrome.tabs.sendMessage(state.activeTabId, response);
+      }
+      return { status: action === 'skip' ? 'skipped' : 'marked_fixed', index, responseType: response.type };
+    }
+
+    return { error: 'unknown assist action' };
   },
 
   'REPLAY_HEARTBEAT': async (msg, sender) => {

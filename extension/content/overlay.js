@@ -10,6 +10,8 @@
   window.Trigger = window.Trigger || {};
 
   var overlayRoot = null;
+  var assistState = 'idle';
+  var assistContext = null;
 
   // ── Overlay Container ──────────────────────────────────────────
 
@@ -77,6 +79,8 @@
       overlayRoot.remove();
       overlayRoot = null;
     }
+    assistState = 'idle';
+    assistContext = null;
   };
 
   // ── Progress ───────────────────────────────────────────────────
@@ -123,34 +127,106 @@
 
   // ── Assist Panel ───────────────────────────────────────────────
 
-  window.Trigger.showAssistPanel = function (step, index, total, reason) {
+  window.Trigger.assistAttempting = function (payload) {
+    assistContext = payload || assistContext;
+    setAssistState('attempting', 'message:attempting');
+    renderAssistPanel();
+  };
+
+  window.Trigger.assistResolved = function (payload) {
+    assistContext = payload || assistContext;
+    setAssistState('resolved', 'message:resolved');
+    renderAssistPanel();
+  };
+
+  window.Trigger.showAssistPanel = function (payload) {
     if (!overlayRoot) window.Trigger.createOverlay('replaying');
     var shadow = overlayRoot.shadowRoot;
     if (!shadow) return;
 
+    assistContext = payload || {};
+    // Failure display is explicit: failed -> awaiting_user.
+    setAssistState('failed', 'message:failed');
+    setAssistState('awaiting_user', 'message:awaiting_user');
+    renderAssistPanel();
+  };
+
+  function setAssistState(nextState, trigger) {
+    var allowed = {
+      idle: ['attempting', 'failed'],
+      attempting: ['failed', 'resolved'],
+      failed: ['awaiting_user', 'resolved'],
+      awaiting_user: ['attempting', 'resolved'],
+      resolved: ['idle', 'attempting'],
+    };
+
+    if (assistState === nextState) return true;
+    if (!allowed[assistState] || allowed[assistState].indexOf(nextState) === -1) {
+      console.warn('[Trigger] Invalid assist state transition', assistState, '->', nextState, 'via', trigger);
+      return false;
+    }
+    assistState = nextState;
+    return true;
+  }
+
+  function renderAssistPanel() {
+    if (!overlayRoot) return;
+    var shadow = overlayRoot.shadowRoot;
+    if (!shadow) return;
+
     var assist = shadow.getElementById('trigger-assist');
+    if (!assist) return;
+
+    if (assistState === 'idle' || assistState === 'attempting' || assistState === 'resolved') {
+      assist.style.display = 'none';
+      if (assistState === 'resolved') {
+        // Explicitly close state machine loop.
+        setAssistState('idle', 'message:resolved_cleanup');
+      }
+      return;
+    }
+
+    var ctx = assistContext || {};
+    var index = typeof ctx.index === 'number' ? ctx.index : 0;
+    var total = typeof ctx.total === 'number' ? ctx.total : 0;
+    var retryAttempt = (typeof ctx.retries === 'number' ? ctx.retries : 0) + 1;
+    var maxRetries = typeof ctx.maxRetries === 'number' ? ctx.maxRetries : 0;
+    var reasonType = ctx.reasonType || 'unknown_error';
+    var reason = ctx.reason || 'Step failed';
+
     assist.innerHTML =
       '<div class="assist-title">Step ' + (index + 1) + ' of ' + total + '</div>' +
+      '<div class="assist-meta">Failure Type: <span class="assist-chip">' + escapeHtml(reasonType) + '</span></div>' +
+      '<div class="assist-meta">Retry ' + retryAttempt + ' of ' + maxRetries + '</div>' +
       '<div class="assist-desc">' +
-        describeStep(step) + '<br>' +
+        describeStep(ctx.step || {}) + '<br>' +
         '<small style="color:#9ca3af">' + escapeHtml(reason) + '</small>' +
       '</div>' +
       '<div class="assist-actions">' +
-        '<button class="assist-btn secondary" id="assist-skip">Skip this step</button>' +
         '<button class="assist-btn primary" id="assist-retry">Retry</button>' +
+        '<button class="assist-btn secondary" id="assist-skip">Skip</button>' +
+        '<button class="assist-btn tertiary" id="assist-mark-fixed">Mark as Fixed</button>' +
       '</div>';
     assist.style.display = 'block';
 
-    shadow.getElementById('assist-skip').addEventListener('click', function () {
-      assist.style.display = 'none';
-      chrome.runtime.sendMessage({ type: 'STEP_COMPLETED', index: index });
-    });
+    wireAssistAction(shadow, 'assist-retry', 'retry', index);
+    wireAssistAction(shadow, 'assist-skip', 'skip', index);
+    wireAssistAction(shadow, 'assist-mark-fixed', 'mark_fixed', index);
+  }
 
-    shadow.getElementById('assist-retry').addEventListener('click', function () {
-      assist.style.display = 'none';
-      chrome.runtime.sendMessage({ type: 'REPLAY_READY' });
+  function wireAssistAction(shadow, elementId, action, index) {
+    var btn = shadow.getElementById(elementId);
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      if (!setAssistState('resolved', 'user:' + action)) return;
+      renderAssistPanel();
+      chrome.runtime.sendMessage({
+        type: 'ASSIST_ACTION',
+        action: action,
+        index: index,
+      }).catch(function () {});
     });
-  };
+  }
 
   // ── Toasts ─────────────────────────────────────────────────────
 
@@ -209,14 +285,18 @@
       'box-shadow:0 8px 30px rgba(0,0,0,.2);padding:16px;pointer-events:auto;z-index:2147483647;' +
       'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}' +
     '.assist-title{font-size:14px;font-weight:700;color:#1e1b4b;margin-bottom:4px}' +
+    '.assist-meta{font-size:11px;color:#4b5563;margin-bottom:6px}' +
+    '.assist-chip{display:inline-block;padding:2px 6px;border-radius:999px;background:#eef2ff;color:#3730a3;font-weight:700}' +
     '.assist-desc{font-size:12px;color:#6b7280;margin-bottom:12px;line-height:1.4}' +
-    '.assist-actions{display:flex;gap:8px}' +
+    '.assist-actions{display:flex;gap:6px}' +
     '.assist-btn{flex:1;padding:8px 12px;border-radius:8px;font-size:12px;font-weight:600;' +
       'cursor:pointer;border:none;transition:background .15s}' +
     '.assist-btn.primary{background:#4f46e5;color:#fff}' +
     '.assist-btn.primary:hover{background:#4338ca}' +
     '.assist-btn.secondary{background:#f3f4f6;color:#374151}' +
     '.assist-btn.secondary:hover{background:#e5e7eb}' +
+    '.assist-btn.tertiary{background:#fef3c7;color:#92400e}' +
+    '.assist-btn.tertiary:hover{background:#fde68a}' +
     '.toast{position:fixed;bottom:20px;right:20px;padding:12px 20px;border-radius:10px;font-size:13px;' +
       'font-weight:600;pointer-events:auto;box-shadow:0 4px 20px rgba(0,0,0,.2);' +
       'animation:slideUp .3s ease;z-index:2147483647;' +
