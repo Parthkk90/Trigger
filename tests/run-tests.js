@@ -818,15 +818,25 @@ function testOverlay() {
   });
 
   test('showAssistPanel displays panel in shadow DOM', () => {
+    T.assistAttempting({ index: 1, total: 5, step: { type: 'click', target: { text: 'Submit' } } });
     T.showAssistPanel(
-      { type: 'click', target: { text: 'Submit' } },
-      1, 5, 'Element not found'
+      {
+        step: { type: 'click', target: { text: 'Submit' } },
+        index: 1,
+        total: 5,
+        reason: 'Element not found',
+        reasonType: 'selector_not_found',
+        retries: 1,
+        maxRetries: 3,
+      }
     );
     const overlay = document.getElementById('trigger-overlay');
     const shadow = overlay.shadowRoot;
     const assist = shadow.getElementById('trigger-assist');
     assertEqual(assist.style.display, 'block');
     assertIncludes(assist.innerHTML, 'Step 2 of 5');
+    assertIncludes(assist.innerHTML, 'selector_not_found');
+    assertIncludes(assist.innerHTML, 'Retry 2 of 3');
     assertIncludes(assist.innerHTML, 'Element not found');
     T.destroyOverlay();
   });
@@ -902,7 +912,7 @@ async function testServiceWorker() {
       'START_RECORDING', 'STOP_RECORDING', 'RECORD_STEP',
       'START_REPLAY', 'REPLAY_READY', 'STEP_COMPLETED',
       'STOP_REPLAY', 'STEP_FAILED', 'GET_STATE',
-      'GET_WORKFLOWS', 'DELETE_WORKFLOW', 'REPLAY_HEARTBEAT',
+      'GET_WORKFLOWS', 'DELETE_WORKFLOW', 'REPLAY_HEARTBEAT', 'ASSIST_ACTION',
     ];
     for (const handler of expectedHandlers) {
       assertIncludes(swCode, `'${handler}'`, `Missing handler: ${handler}`);
@@ -940,11 +950,17 @@ async function testServiceWorker() {
   });
 
   test('STEP_COMPLETED advances replayIndex correctly', () => {
-    assertIncludes(swCode, 'state.replayIndex = msg.index + 1');
+    assertIncludes(swCode, "return await getReplayResponseForCompletedIndex(msg.index)");
+    assertIncludes(swCode, 'state.replayIndex = index + 1');
   });
 
   test('START_REPLAY opens new tab with startUrl', () => {
     assertIncludes(swCode, 'chrome.tabs.create({ url: workflow.startUrl })');
+  });
+
+  test('tab removal listener aborts active replay', () => {
+    assertIncludes(swCode, 'chrome.tabs.onRemoved.addListener');
+    assertIncludes(swCode, "abortReplaySession('tab_closed'");
   });
 }
 

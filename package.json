@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node tests/run-tests.js",
+    "test": "node tests/run-tests.js && node tests/test-recovery.js",
+    "test:extension": "node tests/run-tests.js",
+    "test:recovery": "node tests/test-recovery.js",
     "test:viewer": "node tests/test-viewer.js",
     "test:backend": "node tests/test-backend.js",
     "test:all": "npm test && npm run test:viewer && npm run test:backend",
