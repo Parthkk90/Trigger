@@ -188,11 +188,13 @@ Run the comprehensive test suite:
 ```bash
 npm install --save-dev jsdom
 npm test
+npm run test:viewer
+npm run test:backend
 # or
 node tests/run-tests.js
 ```
 
-**79 tests cover:**
+**81 extension tests + 5 viewer tests + 24 backend tests cover:**
 - Manifest validation (MV3 compliance)
 - Syntax checking (all 7 JS files)
 - Fingerprinting engine (all element types)
@@ -203,6 +205,8 @@ node tests/run-tests.js
 - Service worker logic (state, storage, message routing)
 - Popup UI (workflow management)
 - Integration round-trips (record → resolve)
+- Viewer URL parsing, backend resolution, and extension handoff
+- Backend API validation and share-link resolution
 
 ## 🔐 Security & Privacy
 
@@ -210,8 +214,19 @@ node tests/run-tests.js
 - **No telemetry**: Your workflows stay in your browser
 - **Encrypted sharing**: Use HTTPS when sharing URLs
 - **Sensitive field redaction**: Passwords never stored
+- **Expanded sensitive masking**: password/card/token/SSN-like fields are redacted; sensitive keypress events are not recorded
 - **Content isolation**: Shadow DOM prevents style conflicts
 - **No cross-domain access**: Only runs on current domain
+
+### Extension Permission Rationale
+
+- `activeTab`: start recording/replay on the currently active tab.
+- `storage`: persist workflows, runtime state, and local debug logs.
+- `tabs`: create and update tabs for replay navigation.
+- `scripting`: required for resilient extension execution hooks.
+- `host_permissions: <all_urls>`: needed because workflows can be recorded/replayed on arbitrary user-selected sites.
+
+For implementation details and current audit notes, see [docs/security-audit.md](./docs/security-audit.md).
 
 ## 🐛 Debugging
 
@@ -228,6 +243,7 @@ node tests/run-tests.js
 - Page structure changed since recording
 - Element hidden or off-screen
 - Timing issue: element loads slowly
+ - Retry budget exhausted for selector recovery
   → Solution: Wait a few seconds or re-record
 
 **Empty steps after recording:**
@@ -293,6 +309,8 @@ node tests/run-tests.js
 ```
 
 ## 🚦 Roadmap
+
+For a code-verified implementation status and delivery plan, see [IMPLEMENTATION_ROADMAP.md](./IMPLEMENTATION_ROADMAP.md).
 
 **Phase 0 (Current)**: POC with basic recording/replay ✅
 - Element fingerprinting ✅

@@ -5,8 +5,9 @@
   "main": "index.js",
   "scripts": {
     "test": "node tests/run-tests.js",
+    "test:viewer": "node tests/test-viewer.js",
     "test:backend": "node tests/test-backend.js",
-    "test:all": "npm test && npm run test:backend",
+    "test:all": "npm test && npm run test:viewer && npm run test:backend",
     "backend:start": "node backend/server.js"
   },
   "keywords": [],
