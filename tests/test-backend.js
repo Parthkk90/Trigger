@@ -315,6 +315,14 @@ test('GET /l/:slug HTML includes CSP meta tag', async () => {
   await app.close();
 });
 
+test('GET /1/:slug redirects to /l/:slug', async () => {
+  const { app } = buildTestApp();
+  const response = await app.inject({ method: 'GET', url: '/1/demo-slug' });
+  assert.equal(response.statusCode, 302);
+  assert.equal(response.headers.location, '/l/demo-slug');
+  await app.close();
+});
+
 test('POST /api/workflows upsert keeps slug for same id', async () => {
   const { app } = buildTestApp({ slug: 'slugstable01' });
   const first = await app.inject({

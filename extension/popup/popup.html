@@ -118,6 +118,32 @@
       50% { opacity: 0.3; }
     }
 
+    .notice {
+      margin: 10px 16px 0;
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      line-height: 1.35;
+      border: 1px solid;
+      word-break: break-word;
+      display: none;
+    }
+    .notice.info {
+      background: #eff6ff;
+      border-color: #bfdbfe;
+      color: #1d4ed8;
+    }
+    .notice.success {
+      background: #ecfdf5;
+      border-color: #a7f3d0;
+      color: #047857;
+    }
+    .notice.error {
+      background: #fef2f2;
+      border-color: #fecaca;
+      color: #b91c1c;
+    }
+
     .workflows {
       padding: 12px 16px;
       max-height: 300px;
@@ -235,6 +261,8 @@
     <div class="status-dot idle" id="status-dot"></div>
     <span id="status-text">Ready</span>
   </div>
+
+  <div class="notice" id="notice"></div>
 
   <div class="workflows" id="workflows">
     <h2>Saved Workflows</h2>

@@ -319,6 +319,12 @@ function createApp(options = {}) {
     reply.type('text/html').send(html);
   });
 
+  // Alias for common "l" vs "1" confusion in copied share links.
+  app.get('/1/:slug', async (request, reply) => {
+    const slug = request.params.slug;
+    reply.redirect(`/l/${encodeURIComponent(slug)}`, 302);
+  });
+
   return {
     app,
     pool,

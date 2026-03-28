@@ -12,7 +12,7 @@
  */
 
 // ── Configuration ─────────────────────────────────────────────────
-const DEFAULT_API_BASE_URL = 'http://localhost:8787';
+const DEFAULT_API_BASE_URL = getDefaultApiBaseUrl();
 const API_BASE_URL = resolveBackendBaseUrl();
 const EXTENSION_INSTALL_URL = 'https://chromewebstore.google.com/';
 
@@ -176,6 +176,17 @@ function resolveBackendBaseUrl() {
   return sanitized || DEFAULT_API_BASE_URL;
 }
 
+function getDefaultApiBaseUrl() {
+  try {
+    if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
+      return window.location.origin;
+    }
+  } catch (err) {
+    // Ignore and use null fallback below.
+  }
+  return null;
+}
+
 function sanitizeBaseUrl(value) {
   if (!value || typeof value !== 'string') return null;
   try {
@@ -193,6 +204,11 @@ function sanitizeBaseUrl(value) {
  */
 async function loadWorkflowFromBackend(slug) {
   showMessage('Loading workflow...', 'info');
+
+  if (!API_BASE_URL) {
+    showMessage('Backend URL is not configured. Add backend_url query param to use ?slug= links.', 'error');
+    return;
+  }
 
   try {
     const controller = new AbortController();

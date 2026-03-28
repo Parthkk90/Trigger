@@ -7,10 +7,9 @@ const btnRecord = document.getElementById('btn-record');
 const controls = document.getElementById('controls');
 const statusDot = document.getElementById('status-dot');
 const statusText = document.getElementById('status-text');
+const notice = document.getElementById('notice');
 const workflowList = document.getElementById('workflow-list');
 const btnSettings = document.getElementById('btn-settings');
-
-const DEFAULT_BACKEND_URL = 'http://localhost:8787';
 
 let currentState = null;
 
@@ -22,7 +21,7 @@ async function init() {
 
   // Set up event delegation once
   workflowList.addEventListener('click', handleWorkflowAction);
-  btnSettings.addEventListener('click', configureBackendUrl);
+  btnSettings.addEventListener('click', configureShareSettings);
 
   await loadWorkflows();
 }
@@ -131,7 +130,7 @@ async function handleWorkflowAction(event) {
     case 'play':
       currentState = await sendMessage({ type: 'START_REPLAY', workflowId: id });
       if (currentState?.error) {
-        alert(`Replay failed: ${currentState.error}`);
+        showNotice(`Replay failed: ${currentState.error}`, 'error');
         return;
       }
       currentState.mode = 'replaying';
@@ -178,20 +177,28 @@ async function shareWorkflow(id) {
 
   // Fallback for local-only mode if backend is unavailable.
   if (!shareUrl) {
-    const viewerUrl = 'http://localhost:8080';
+    const viewerUrl = await getViewerUrl();
+    if (!viewerUrl) {
+      showNotice('No viewer URL configured. Open settings to set one.', 'error');
+      return;
+    }
+
     const backendUrl = await getBackendUrl();
     const workflowJson = JSON.stringify(workflow);
     const encoded = encodeURIComponent(workflowJson);
-    shareUrl = `${viewerUrl}?workflow=${encoded}&backend_url=${encodeURIComponent(backendUrl)}`;
+    shareUrl = `${viewerUrl}?workflow=${encoded}`;
+    if (backendUrl) {
+      shareUrl += `&backend_url=${encodeURIComponent(backendUrl)}`;
+    }
   }
 
   // Try to copy to clipboard
   try {
     await navigator.clipboard.writeText(shareUrl);
-    alert(`✓ Share link copied to clipboard!\n\n${shareUrl}`);
+    showNotice(`Share link copied to clipboard: ${shareUrl}`, 'success', 12000);
   } catch (err) {
-    // Fallback: show the URL in a dialog
-    alert(`Share this link:\n\n${shareUrl}`);
+    // Fallback: keep the URL visible in popup if clipboard is blocked.
+    showNotice(`Clipboard blocked. Copy this link: ${shareUrl}`, 'info', 20000);
   }
 }
 
@@ -203,26 +210,73 @@ function sendMessage(msg) {
 
 async function getBackendUrl() {
   const result = await chrome.storage.sync.get('backendUrl');
-  return sanitizeUrl(result.backendUrl) || DEFAULT_BACKEND_URL;
+  return sanitizeUrl(result.backendUrl) || null;
 }
 
-async function configureBackendUrl() {
-  const current = await getBackendUrl();
-  const entered = window.prompt('Backend URL (origin only):', current);
-  if (entered === null) return;
+async function getViewerUrl() {
+  const result = await chrome.storage.sync.get('viewerUrl');
+  return sanitizeUrl(result.viewerUrl) || null;
+}
 
-  const sanitized = sanitizeUrl(entered);
-  if (!sanitized) {
-    alert('Invalid URL. Use http://host:port or https://host');
+async function configureShareSettings() {
+  const currentBackend = await getBackendUrl();
+  const currentViewer = await getViewerUrl();
+
+  const backendInput = window.prompt(
+    'Backend URL (origin only). Leave blank to disable backend upload:',
+    currentBackend || ''
+  );
+  if (backendInput === null) return;
+
+  const viewerInput = window.prompt(
+    'Viewer URL (origin only). Needed for URL-embedded sharing fallback:',
+    currentViewer || ''
+  );
+  if (viewerInput === null) return;
+
+  const backendSanitized = backendInput.trim() ? sanitizeUrl(backendInput.trim()) : null;
+  const viewerSanitized = viewerInput.trim() ? sanitizeUrl(viewerInput.trim()) : null;
+
+  if (backendInput.trim() && !backendSanitized) {
+    showNotice('Invalid backend URL. Use http://host:port or https://host', 'error');
+    return;
+  }
+  if (viewerInput.trim() && !viewerSanitized) {
+    showNotice('Invalid viewer URL. Use http://host or https://host', 'error');
     return;
   }
 
-  const result = await sendMessage({ type: 'SET_BACKEND_URL', backendUrl: sanitized });
-  if (result?.error) {
-    alert(`Failed to save URL: ${result.error}`);
-    return;
+  if (backendSanitized) {
+    const result = await sendMessage({ type: 'SET_BACKEND_URL', backendUrl: backendSanitized });
+    if (result?.error) {
+      showNotice(`Failed to save backend URL: ${result.error}`, 'error');
+      return;
+    }
+  } else {
+    await chrome.storage.sync.remove('backendUrl');
   }
-  alert(`Backend URL saved: ${sanitized}`);
+
+  if (viewerSanitized) {
+    await chrome.storage.sync.set({ viewerUrl: viewerSanitized });
+  } else {
+    await chrome.storage.sync.remove('viewerUrl');
+  }
+
+  showNotice('Share settings saved', 'success');
+}
+
+function showNotice(message, type = 'info', timeoutMs = 6000) {
+  if (!notice) return;
+  notice.className = `notice ${type}`;
+  notice.textContent = message;
+  notice.style.display = 'block';
+
+  if (showNotice.timer) {
+    clearTimeout(showNotice.timer);
+  }
+  showNotice.timer = setTimeout(() => {
+    notice.style.display = 'none';
+  }, timeoutMs);
 }
 
 function sanitizeUrl(value) {
