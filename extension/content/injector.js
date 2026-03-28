@@ -11,6 +11,7 @@
   window.Trigger.installNavigationWatcher();
 
   var currentMode = 'idle';
+  var replayHeartbeatInterval = null;
 
   // ── Page Bridge (slug resolver page ↔ extension) ───────────────
 
@@ -68,6 +69,17 @@
         sendResponse({ ok: true });
         break;
 
+      case 'EXECUTE_STEP_RECOVERY':
+        chrome.runtime.sendMessage({ type: 'REPLAY_READY' }).then(function (response) {
+          if (!response) return;
+          if (response.type === 'EXECUTE_STEP') {
+            window.Trigger.showProgressBar(response.total);
+            handleExecuteStep(response.step, response.index, response.total);
+          }
+        }).catch(function () {});
+        sendResponse({ ok: true });
+        break;
+
       case 'SHOW_ASSIST':
         window.Trigger.showAssistPanel(message.step, message.index, message.total, message.reason);
         sendResponse({ ok: true });
@@ -84,12 +96,14 @@
 
   function handleRecorderStart() {
     currentMode = 'recording';
+    stopReplayHeartbeat();
     window.Trigger.startRecording();
     window.Trigger.createOverlay('recording');
   }
 
   function handleRecorderStop() {
     currentMode = 'idle';
+    stopReplayHeartbeat();
     window.Trigger.stopRecording();
     window.Trigger.destroyOverlay();
   }
@@ -102,6 +116,7 @@
       window.Trigger.resetReplay();
       window.Trigger.createOverlay('replaying');
       window.Trigger.showProgressBar(total);
+      startReplayHeartbeat();
     }
 
     window.Trigger.updateProgress(index, total, step);
@@ -118,6 +133,7 @@
           index: index,
           reason: result.reason,
           confidence: result.confidence,
+          reasonType: result.reasonType,
         });
       }
     }).then(function (response) {
@@ -136,14 +152,30 @@
 
   function handleReplayComplete() {
     currentMode = 'idle';
+    stopReplayHeartbeat();
     window.Trigger.showCompletionToast();
     setTimeout(function () { window.Trigger.destroyOverlay(); }, 3000);
   }
 
   function handleReplayAbort() {
     currentMode = 'idle';
+    stopReplayHeartbeat();
     window.Trigger.abortReplay();
     window.Trigger.destroyOverlay();
+  }
+
+  function startReplayHeartbeat() {
+    stopReplayHeartbeat();
+    replayHeartbeatInterval = setInterval(function () {
+      chrome.runtime.sendMessage({ type: 'REPLAY_HEARTBEAT' }).catch(function () {});
+    }, 10000);
+  }
+
+  function stopReplayHeartbeat() {
+    if (replayHeartbeatInterval) {
+      clearInterval(replayHeartbeatInterval);
+      replayHeartbeatInterval = null;
+    }
   }
 
   // ── On page load: check if a replay is in progress ─────────────

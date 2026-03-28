@@ -32,7 +32,12 @@
 
     return waitForElement(step.target).then(function (result) {
       if (!result.element) {
-        return { success: false, confidence: 0, reason: 'Element not found after waiting' };
+        return {
+          success: false,
+          confidence: 0,
+          reason: 'Element not found after waiting',
+          reasonType: 'selector_not_found',
+        };
       }
 
       return animateGhostCursor(result.element).then(function () {
@@ -41,6 +46,7 @@
             success: false,
             confidence: result.confidence,
             reason: 'Low confidence match (' + result.confidence + '%)',
+            reasonType: 'selector_not_found',
             element: result.element,
           };
         }
@@ -55,7 +61,13 @@
         });
       });
     }).catch(function (err) {
-      return { success: false, confidence: 0, reason: err.message };
+      var msg = err && err.message ? err.message : 'Unknown replay error';
+      return {
+        success: false,
+        confidence: 0,
+        reason: msg,
+        reasonType: classifyReplayErrorType(msg),
+      };
     });
   };
 
@@ -196,10 +208,22 @@
     var deadline = Date.now() + timeout;
     function poll() {
       if (window.location.href === expectedUrl) return Promise.resolve();
-      if (Date.now() >= deadline) return Promise.resolve();
+      if (Date.now() >= deadline) {
+        return Promise.reject(new Error('Navigation timeout waiting for ' + expectedUrl));
+      }
       return sleep(200).then(poll);
     }
     return poll();
+  }
+
+  function classifyReplayErrorType(message) {
+    var text = String(message || '').toLowerCase();
+    if (text.indexOf('not found') !== -1 || text.indexOf('confidence') !== -1) return 'selector_not_found';
+    if (text.indexOf('timeout') !== -1) return 'navigation_timeout';
+    if (text.indexOf('aborted') !== -1) return 'aborted';
+    if (text.indexOf('permission') !== -1 || text.indexOf('denied') !== -1) return 'permission_error';
+    if (text.indexOf('unknown step') !== -1) return 'action_error';
+    return 'unknown_error';
   }
 
   // ── Ghost Cursor ───────────────────────────────────────────────

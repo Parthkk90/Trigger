@@ -11,10 +11,17 @@ let state = {
   workflowId: null,
   steps: [],
   replayIndex: 0,
+  stepRetries: {},
+  maxStepRetries: 3,
+  lastReplayHeartbeatAt: 0,
+  lastReplayProgressAt: 0,
+  recoveryAttempts: 0,
 };
 
-const DEFAULT_API_BASE_URL = 'http://localhost:8787';
-let backendUrlCache = DEFAULT_API_BASE_URL;
+let backendUrlCache = null;
+const KEEPALIVE_INTERVAL_MS = 20000;
+const REPLAY_HEARTBEAT_STALE_MS = 45000;
+const MAX_RECOVERY_ATTEMPTS = 3;
 
 // ── MV3 Keepalive ──────────────────────────────────────────────────
 // Service workers die after ~30s of inactivity in MV3.
@@ -26,7 +33,13 @@ function startKeepalive() {
   keepaliveInterval = setInterval(() => {
     // Any chrome API call resets the termination timer
     chrome.storage.session.get('keepalive');
-  }, 20000);
+
+    if (state.mode === 'replaying') {
+      maybeRecoverReplay().catch((err) => {
+        console.warn('[Trigger] Replay recovery tick failed:', err.message);
+      });
+    }
+  }, KEEPALIVE_INTERVAL_MS);
 }
 
 function stopKeepalive() {
@@ -44,21 +57,29 @@ async function persistState() {
 async function restoreState() {
   const result = await chrome.storage.session.get('triggerState');
   if (result.triggerState) {
-    state = result.triggerState;
+    state = {
+      ...state,
+      ...result.triggerState,
+      stepRetries: result.triggerState.stepRetries || {},
+      maxStepRetries: result.triggerState.maxStepRetries || 3,
+      lastReplayHeartbeatAt: result.triggerState.lastReplayHeartbeatAt || 0,
+      lastReplayProgressAt: result.triggerState.lastReplayProgressAt || 0,
+      recoveryAttempts: result.triggerState.recoveryAttempts || 0,
+    };
     if (state.mode !== 'idle') {
       startKeepalive();
     }
   }
 }
 
-// Reads backend URL from sync storage with safe localhost fallback.
+// Reads backend URL from sync storage.
 async function getBackendBaseUrl() {
-  if (backendUrlCache && backendUrlCache !== DEFAULT_API_BASE_URL) {
+  if (backendUrlCache) {
     return backendUrlCache;
   }
   const result = await chrome.storage.sync.get('backendUrl');
   const configured = sanitizeUrl(result.backendUrl);
-  backendUrlCache = configured || DEFAULT_API_BASE_URL;
+  backendUrlCache = configured || null;
   return backendUrlCache;
 }
 
@@ -87,6 +108,56 @@ function validateReplayWorkflow(workflow) {
     return { valid: false, error: 'workflow.startUrl is required' };
   }
   return { valid: true };
+}
+
+function classifyFailure(reason, reasonType) {
+  if (reasonType) return reasonType;
+  var text = String(reason || '').toLowerCase();
+  if (text.includes('not found') || text.includes('low confidence')) return 'selector_not_found';
+  if (text.includes('timeout') || text.includes('timed out')) return 'navigation_timeout';
+  if (text.includes('permission') || text.includes('denied')) return 'permission_error';
+  if (text.includes('aborted')) return 'aborted';
+  if (text.includes('unknown step')) return 'action_error';
+  return 'unknown_error';
+}
+
+function isRetryableFailure(reasonType) {
+  return reasonType === 'selector_not_found' || reasonType === 'navigation_timeout' || reasonType === 'unknown_error';
+}
+
+async function logReplayFailure(entry) {
+  const result = await chrome.storage.local.get('replayDebugLogs');
+  const logs = Array.isArray(result.replayDebugLogs) ? result.replayDebugLogs : [];
+  logs.push(entry);
+  const capped = logs.slice(-200);
+  await chrome.storage.local.set({ replayDebugLogs: capped });
+}
+
+async function maybeRecoverReplay() {
+  if (state.mode !== 'replaying' || !state.activeTabId) return;
+
+  const now = Date.now();
+  const staleSince = Math.max(state.lastReplayHeartbeatAt || 0, state.lastReplayProgressAt || 0);
+  if (!staleSince || now - staleSince < REPLAY_HEARTBEAT_STALE_MS) return;
+  if (state.recoveryAttempts >= MAX_RECOVERY_ATTEMPTS) return;
+
+  state.recoveryAttempts += 1;
+  state.lastReplayHeartbeatAt = now;
+  await persistState();
+
+  try {
+    await chrome.tabs.sendMessage(state.activeTabId, { type: 'PING' });
+  } catch (err) {
+    console.warn('[Trigger] Replay tab not ready for recovery ping:', err.message);
+    return;
+  }
+
+  try {
+    await chrome.tabs.sendMessage(state.activeTabId, { type: 'EXECUTE_STEP_RECOVERY' });
+    console.log('[Trigger] Requested replay recovery attempt', state.recoveryAttempts);
+  } catch (err) {
+    console.warn('[Trigger] Failed to send replay recovery request:', err.message);
+  }
 }
 
 // Restore on startup
@@ -208,6 +279,10 @@ const messageHandlers = {
     state.workflowId = msg.workflowId;
     state.steps = workflow.steps;
     state.replayIndex = 0;
+    state.stepRetries = {};
+    state.lastReplayHeartbeatAt = Date.now();
+    state.lastReplayProgressAt = Date.now();
+    state.recoveryAttempts = 0;
     startKeepalive();
     await persistState();
 
@@ -233,7 +308,11 @@ const messageHandlers = {
     state.workflowId = workflow.id || generateId();
     state.steps = workflow.steps;
     state.replayIndex = 0;
+    state.stepRetries = {};
     state.activeTabId = sender.tab.id;
+    state.lastReplayHeartbeatAt = Date.now();
+    state.lastReplayProgressAt = Date.now();
+    state.recoveryAttempts = 0;
     startKeepalive();
     await persistState();
 
@@ -252,6 +331,10 @@ const messageHandlers = {
     if (state.mode !== 'replaying') return { error: 'not replaying' };
     if (sender.tab?.id !== state.activeTabId) return { error: 'wrong tab' };
 
+    state.lastReplayHeartbeatAt = Date.now();
+    state.recoveryAttempts = 0;
+    await persistState();
+
     const step = state.steps[state.replayIndex];
     if (!step) {
       return { type: 'REPLAY_COMPLETE' };
@@ -263,7 +346,11 @@ const messageHandlers = {
   'STEP_COMPLETED': async (msg) => {
     if (state.mode !== 'replaying') return { error: 'not replaying' };
 
+    delete state.stepRetries[msg.index];
     state.replayIndex = msg.index + 1;
+    state.lastReplayProgressAt = Date.now();
+    state.lastReplayHeartbeatAt = Date.now();
+    state.recoveryAttempts = 0;
     await persistState();
 
     if (state.replayIndex >= state.steps.length) {
@@ -297,18 +384,64 @@ const messageHandlers = {
   },
 
   'STEP_FAILED': async (msg) => {
-    // A step failed — switch to assisted mode
-    // For Phase 0, we just pause and let the user know
+    if (state.mode !== 'replaying') return { error: 'not replaying' };
+
+    const index = typeof msg.index === 'number' ? msg.index : state.replayIndex;
+    const reasonType = classifyFailure(msg.reason, msg.reasonType);
+    const retries = state.stepRetries[index] || 0;
+    const maxRetries = state.maxStepRetries || 3;
+    const canRetry = isRetryableFailure(reasonType) && retries < maxRetries;
+
+    await logReplayFailure({
+      ts: Date.now(),
+      workflowId: state.workflowId,
+      index,
+      reason: msg.reason || 'unknown',
+      reasonType,
+      confidence: msg.confidence ?? null,
+      retries,
+      maxRetries,
+      canRetry,
+    });
+
+    if (canRetry) {
+      state.stepRetries[index] = retries + 1;
+      state.lastReplayHeartbeatAt = Date.now();
+      await persistState();
+
+      const step = state.steps[index];
+      return {
+        type: 'EXECUTE_STEP',
+        step,
+        index,
+        total: state.steps.length,
+        retry: {
+          attempt: state.stepRetries[index],
+          maxRetries,
+          reasonType,
+        },
+      };
+    }
+
+    // Retries exhausted or non-retryable — switch to assist mode.
     if (state.activeTabId) {
       chrome.tabs.sendMessage(state.activeTabId, {
         type: 'SHOW_ASSIST',
         step: state.steps[state.replayIndex],
-        index: state.replayIndex,
+        index,
         total: state.steps.length,
-        reason: msg.reason,
+        reason: `[${reasonType}] ${msg.reason || 'Step failed'}`,
       });
     }
-    return { status: 'assisting' };
+    return { status: 'assisting', reasonType, retries, maxRetries };
+  },
+
+  'REPLAY_HEARTBEAT': async (msg, sender) => {
+    if (state.mode !== 'replaying') return { ok: false, reason: 'not replaying' };
+    if (sender.tab?.id !== state.activeTabId) return { ok: false, reason: 'wrong tab' };
+    state.lastReplayHeartbeatAt = Date.now();
+    await persistState();
+    return { ok: true, index: state.replayIndex };
   },
 
   // ── State Queries ──
@@ -376,6 +509,10 @@ async function deleteWorkflow(id) {
 
 async function uploadWorkflowRemote(workflow) {
   const apiBaseUrl = await getBackendBaseUrl();
+  if (!apiBaseUrl) {
+    throw new Error('backend URL not configured');
+  }
+
   const response = await fetch(`${apiBaseUrl}/api/workflows`, {
     method: 'POST',
     headers: {

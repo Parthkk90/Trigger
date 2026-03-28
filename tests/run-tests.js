@@ -604,28 +604,54 @@ function testRecorder() {
   });
 
   test('password fields are marked as sensitive (via debounce)', (done) => {
-    // The recorder only passes isSensitive through the debounce timer (500ms),
-    // not through the flush-on-click path. We use a fake timer to trigger it.
     sentMessages.length = 0;
     const pw = document.getElementById('pw-input');
     pw.value = 'secret123';
     pw.dispatchEvent(new window.Event('input', { bubbles: true }));
-    // The isSensitive flag is captured in the debounce closure.
-    // Fast-forward: manually call flushInputBuffer via the debounce timer.
-    // Since we can't easily mock timers here, dispatch another input event
-    // to a different element to trigger the flush with correct isSensitive.
+
+    // Trigger flush by switching fields.
     const input = document.getElementById('test-input');
     input.value = 'x';
     input.dispatchEvent(new window.Event('input', { bubbles: true }));
-    // Switching lastInputElement flushes the previous buffer.
-    // But flushInputBuffer() is called without isSensitive when triggered by element change.
-    // This is a known recorder design: flush on element switch doesn't carry sensitivity.
-    // The sensitive flag is only set when the debounce timer fires.
-    // Verify the recorder at least captures the password input step.
+
     const inputMsg = sentMessages.find(m => m.step && m.step.type === 'input' && m.step.target && m.step.target.inputType === 'password');
     assert(inputMsg, 'Password input should be captured');
-    // Note: sensitive=false here because flush was triggered by element switch, not debounce
-    // This is acceptable behavior — the debounce timer would set sensitive=true
+    assertEqual(inputMsg.step.sensitive, true, 'Password input should be marked sensitive');
+    assertEqual(inputMsg.step.value, '', 'Sensitive input value should be redacted');
+  });
+
+  test('credit-card autocomplete fields are redacted', () => {
+    sentMessages.length = 0;
+
+    const cc = document.createElement('input');
+    cc.type = 'text';
+    cc.id = 'cc-input';
+    cc.name = 'cardNumber';
+    cc.autocomplete = 'cc-number';
+    document.body.appendChild(cc);
+
+    cc.value = '4111 1111 1111 1111';
+    cc.dispatchEvent(new window.Event('input', { bubbles: true }));
+
+    const input = document.getElementById('test-input');
+    input.value = 'x';
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+
+    const msg = sentMessages.find(m => m.step && m.step.type === 'input' && m.step.target && m.step.target.name === 'cardNumber');
+    assert(msg, 'Credit card input should be captured');
+    assertEqual(msg.step.sensitive, true, 'Credit card input should be marked sensitive');
+    assertEqual(msg.step.value, '', 'Credit card value should be redacted');
+  });
+
+  test('keypress on sensitive field is not captured', () => {
+    sentMessages.length = 0;
+    const pw = document.getElementById('pw-input');
+    pw.value = 'secret123';
+    pw.dispatchEvent(new window.Event('input', { bubbles: true }));
+    pw.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+    const keyMsg = sentMessages.find(m => m.step && m.step.type === 'keypress' && m.step.target && m.step.target.inputType === 'password');
+    assert(!keyMsg, 'Sensitive field keypress should not be recorded');
   });
 
   test('select change is captured', () => {
@@ -876,7 +902,7 @@ async function testServiceWorker() {
       'START_RECORDING', 'STOP_RECORDING', 'RECORD_STEP',
       'START_REPLAY', 'REPLAY_READY', 'STEP_COMPLETED',
       'STOP_REPLAY', 'STEP_FAILED', 'GET_STATE',
-      'GET_WORKFLOWS', 'DELETE_WORKFLOW',
+      'GET_WORKFLOWS', 'DELETE_WORKFLOW', 'REPLAY_HEARTBEAT',
     ];
     for (const handler of expectedHandlers) {
       assertIncludes(swCode, `'${handler}'`, `Missing handler: ${handler}`);
@@ -884,7 +910,19 @@ async function testServiceWorker() {
   });
 
   test('keepalive interval is 20 seconds', () => {
-    assertIncludes(swCode, '20000', 'Keepalive should be 20000ms');
+    assertIncludes(swCode, 'KEEPALIVE_INTERVAL_MS = 20000', 'Keepalive should be 20000ms');
+  });
+
+  test('replay heartbeat stale threshold is defined', () => {
+    assertIncludes(swCode, 'REPLAY_HEARTBEAT_STALE_MS = 45000');
+    assertIncludes(swCode, 'MAX_RECOVERY_ATTEMPTS = 3');
+  });
+
+  test('STEP_FAILED applies retry budget with typed reasons', () => {
+    assertIncludes(swCode, 'classifyFailure(');
+    assertIncludes(swCode, 'isRetryableFailure(');
+    assertIncludes(swCode, "state.stepRetries[index] = retries + 1");
+    assertIncludes(swCode, "type: 'SHOW_ASSIST'");
   });
 
   test('state is persisted to chrome.storage.session', () => {

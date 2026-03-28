@@ -11,7 +11,6 @@
 
   var isRecording = false;
   var lastInputElement = null;
-  var lastInputIsSensitive = false;
   var inputBuffer = '';
   var inputDebounceTimer = null;
 
@@ -76,14 +75,6 @@
       lastInputElement = target;
     }
 
-    var isSensitive = target.type === 'password' ||
-      target.autocomplete === 'cc-number' ||
-      target.autocomplete === 'cc-csc' ||
-      (target.name && target.name.toLowerCase().indexOf('password') !== -1) ||
-      (target.name && target.name.toLowerCase().indexOf('secret') !== -1);
-
-    lastInputIsSensitive = isSensitive;
-
     inputBuffer = target.value;
 
     clearTimeout(inputDebounceTimer);
@@ -118,6 +109,10 @@
     if (event.key === 'Enter' || event.key === 'Tab' || event.key === 'Escape') {
       var target = event.target;
       if (target && target !== document.body) {
+        if (isSensitiveInputTarget(target)) {
+          if (event.key === 'Enter' || event.key === 'Tab') flushInputBuffer();
+          return;
+        }
         if (event.key === 'Enter' || event.key === 'Tab') flushInputBuffer();
         recordStep({
           type: 'keypress',
@@ -133,22 +128,58 @@
   function flushInputBuffer() {
     if (!lastInputElement || !inputBuffer) {
       lastInputElement = null;
-      lastInputIsSensitive = false;
       inputBuffer = '';
       return;
     }
 
+    var isSensitive = isSensitiveInputTarget(lastInputElement) || looksSensitiveValue(inputBuffer);
+
     recordStep({
       type: 'input',
       target: window.Trigger.generateFingerprint(lastInputElement),
-      value: lastInputIsSensitive ? '' : inputBuffer,
-      sensitive: !!lastInputIsSensitive,
+      value: isSensitive ? '' : inputBuffer,
+      sensitive: !!isSensitive,
     });
 
     lastInputElement = null;
-    lastInputIsSensitive = false;
     inputBuffer = '';
     clearTimeout(inputDebounceTimer);
+  }
+
+  function isSensitiveInputTarget(target) {
+    if (!target) return false;
+
+    var type = (target.type || '').toLowerCase();
+    var name = (target.name || '').toLowerCase();
+    var id = (target.id || '').toLowerCase();
+    var placeholder = (target.placeholder || '').toLowerCase();
+    var aria = (target.getAttribute('aria-label') || '').toLowerCase();
+    var autocomplete = (target.autocomplete || '').toLowerCase();
+
+    if (type === 'password') return true;
+
+    if (
+      autocomplete === 'cc-number' ||
+      autocomplete === 'cc-csc' ||
+      autocomplete === 'cc-exp' ||
+      autocomplete === 'cc-exp-month' ||
+      autocomplete === 'cc-exp-year' ||
+      autocomplete === 'one-time-code'
+    ) {
+      return true;
+    }
+
+    var combined = name + ' ' + id + ' ' + placeholder + ' ' + aria;
+    return /(password|passcode|passwd|secret|token|otp|ssn|social|credit|card|cvv|cvc|pin)/.test(combined);
+  }
+
+  function looksSensitiveValue(value) {
+    if (!value || typeof value !== 'string') return false;
+
+    var compact = value.replace(/[\s-]/g, '');
+    if (/^\d{13,19}$/.test(compact)) return true;
+    if (/^\d{3}-?\d{2}-?\d{4}$/.test(value)) return true;
+    return false;
   }
 
   // ── Step Dispatch ──────────────────────────────────────────────
