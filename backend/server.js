@@ -267,6 +267,18 @@ function createApp(options = {}) {
     origin: true,
   });
 
+  app.get('/', async () => ({
+    service: 'flowlink-backend',
+    ok: true,
+    endpoints: {
+      health: '/health',
+      createWorkflow: '/api/workflows',
+      getWorkflow: '/api/workflows/:id',
+      getLink: '/api/links/:slug',
+      replayPage: '/l/:slug',
+    },
+  }));
+
   app.get('/health', async () => ({ ok: true }));
 
   app.post('/api/workflows', async (request, reply) => {
