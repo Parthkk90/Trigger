@@ -11,6 +11,7 @@ let state = {
   workflowId: null,
   steps: [],
   replayIndex: 0,
+  replaySessionStatus: 'idle', // 'idle' | 'active' | 'awaiting_user' | 'recovering' | 'failed' | 'completed' | 'aborted'
   stepRetries: {},
   maxStepRetries: 3,
   lastReplayHeartbeatAt: 0,
@@ -139,7 +140,10 @@ async function maybeRecoverReplay() {
   const now = Date.now();
   const staleSince = Math.max(state.lastReplayHeartbeatAt || 0, state.lastReplayProgressAt || 0);
   if (!staleSince || now - staleSince < REPLAY_HEARTBEAT_STALE_MS) return;
-  if (state.recoveryAttempts >= MAX_RECOVERY_ATTEMPTS) return;
+  if (state.recoveryAttempts >= MAX_RECOVERY_ATTEMPTS) {
+    await abortReplaySession('watchdog_retry_exhausted', 'Max recovery attempts reached');
+    return;
+  }
 
   state.recoveryAttempts += 1;
   state.lastReplayHeartbeatAt = now;
@@ -149,27 +153,75 @@ async function maybeRecoverReplay() {
     await chrome.tabs.sendMessage(state.activeTabId, { type: 'PING' });
   } catch (err) {
     console.warn('[Trigger] Replay tab not ready for recovery ping:', err.message);
+    await logReplayFailure({
+      ts: Date.now(),
+      workflowId: state.workflowId,
+      index: state.replayIndex,
+      reason: err.message,
+      reasonType: 'recovery_ping_failed',
+      retries: state.recoveryAttempts,
+      maxRetries: MAX_RECOVERY_ATTEMPTS,
+      canRetry: state.recoveryAttempts < MAX_RECOVERY_ATTEMPTS,
+      sessionStatus: state.replaySessionStatus,
+    });
     return;
   }
 
   try {
+    state.replaySessionStatus = 'recovering';
+    await persistState();
     await chrome.tabs.sendMessage(state.activeTabId, { type: 'EXECUTE_STEP_RECOVERY' });
     console.log('[Trigger] Requested replay recovery attempt', state.recoveryAttempts);
   } catch (err) {
     console.warn('[Trigger] Failed to send replay recovery request:', err.message);
+    await logReplayFailure({
+      ts: Date.now(),
+      workflowId: state.workflowId,
+      index: state.replayIndex,
+      reason: err.message,
+      reasonType: 'recovery_request_failed',
+      retries: state.recoveryAttempts,
+      maxRetries: MAX_RECOVERY_ATTEMPTS,
+      canRetry: state.recoveryAttempts < MAX_RECOVERY_ATTEMPTS,
+      sessionStatus: state.replaySessionStatus,
+    });
   }
 }
 
+async function abortReplaySession(reasonType, reason) {
+  await logReplayFailure({
+    ts: Date.now(),
+    workflowId: state.workflowId,
+    index: state.replayIndex,
+    reason: reason || 'Replay aborted',
+    reasonType: reasonType || 'unknown_error',
+    retries: state.recoveryAttempts || 0,
+    maxRetries: MAX_RECOVERY_ATTEMPTS,
+    canRetry: false,
+    sessionStatus: 'failed',
+  });
+
+  state.mode = 'idle';
+  state.replaySessionStatus = 'failed';
+  state.lastReplayHeartbeatAt = 0;
+  state.lastReplayProgressAt = 0;
+  state.activeTabId = null;
+  stopKeepalive();
+  await persistState();
+}
+
 async function getReplayResponseForCompletedIndex(index) {
-  delete state.stepRetries[index];
   state.replayIndex = index + 1;
   state.lastReplayProgressAt = Date.now();
   state.lastReplayHeartbeatAt = Date.now();
   state.recoveryAttempts = 0;
+  state.replaySessionStatus = 'active';
+  delete state.stepRetries[index];
   await persistState();
 
   if (state.replayIndex >= state.steps.length) {
     state.mode = 'idle';
+    state.replaySessionStatus = 'completed';
     stopKeepalive();
     await persistState();
     return { type: 'REPLAY_COMPLETE' };
@@ -177,7 +229,7 @@ async function getReplayResponseForCompletedIndex(index) {
 
   const nextStep = state.steps[state.replayIndex];
   if (nextStep.type === 'navigate') {
-    chrome.tabs.update(state.activeTabId, { url: nextStep.url });
+    await chrome.tabs.update(state.activeTabId, { url: nextStep.url });
     return { type: 'WAITING_NAVIGATION' };
   }
 
@@ -211,6 +263,7 @@ const messageHandlers = {
     state.activeTabId = sender.tab?.id ?? msg.tabId;
     state.steps = [];
     state.workflowId = generateId();
+    state.replaySessionStatus = 'idle';
     startKeepalive();
     await persistState();
 
@@ -259,6 +312,7 @@ const messageHandlers = {
 
     state.mode = 'idle';
     state.activeTabId = null;
+    state.replaySessionStatus = 'idle';
     stopKeepalive();
     await persistState();
 
@@ -303,6 +357,7 @@ const messageHandlers = {
     state.workflowId = msg.workflowId;
     state.steps = workflow.steps;
     state.replayIndex = 0;
+    state.replaySessionStatus = 'active';
     state.stepRetries = {};
     state.lastReplayHeartbeatAt = Date.now();
     state.lastReplayProgressAt = Date.now();
@@ -332,6 +387,7 @@ const messageHandlers = {
     state.workflowId = workflow.id || generateId();
     state.steps = workflow.steps;
     state.replayIndex = 0;
+    state.replaySessionStatus = 'active';
     state.stepRetries = {};
     state.activeTabId = sender.tab.id;
     state.lastReplayHeartbeatAt = Date.now();
@@ -357,6 +413,7 @@ const messageHandlers = {
 
     state.lastReplayHeartbeatAt = Date.now();
     state.recoveryAttempts = 0;
+    state.replaySessionStatus = 'active';
     await persistState();
 
     const step = state.steps[state.replayIndex];
@@ -377,7 +434,10 @@ const messageHandlers = {
       chrome.tabs.sendMessage(state.activeTabId, { type: 'REPLAY_ABORT' }).catch(() => {});
     }
     state.mode = 'idle';
+    state.replaySessionStatus = 'aborted';
     state.replayIndex = 0;
+    state.lastReplayHeartbeatAt = 0;
+    state.lastReplayProgressAt = 0;
     stopKeepalive();
     await persistState();
     return { status: 'stopped' };
@@ -407,6 +467,7 @@ const messageHandlers = {
     if (canRetry) {
       state.stepRetries[index] = retries + 1;
       state.lastReplayHeartbeatAt = Date.now();
+      state.replaySessionStatus = 'active';
       await persistState();
 
       const step = state.steps[index];
@@ -424,6 +485,9 @@ const messageHandlers = {
     }
 
     // Retries exhausted or non-retryable — switch to assist mode.
+    state.replaySessionStatus = 'awaiting_user';
+    await persistState();
+
     if (state.activeTabId) {
       chrome.tabs.sendMessage(state.activeTabId, {
         type: 'SHOW_ASSIST',
@@ -448,6 +512,7 @@ const messageHandlers = {
 
     if (action === 'retry') {
       const step = state.steps[index];
+      state.replaySessionStatus = 'active';
       state.lastReplayHeartbeatAt = Date.now();
       await persistState();
 
@@ -477,6 +542,8 @@ const messageHandlers = {
     if (state.mode !== 'replaying') return { ok: false, reason: 'not replaying' };
     if (sender.tab?.id !== state.activeTabId) return { ok: false, reason: 'wrong tab' };
     state.lastReplayHeartbeatAt = Date.now();
+    state.replaySessionStatus = 'active';
+    state.recoveryAttempts = 0;
     await persistState();
     return { ok: true, index: state.replayIndex };
   },
@@ -485,9 +552,11 @@ const messageHandlers = {
   'GET_STATE': async () => {
     return {
       mode: state.mode,
+      sessionStatus: state.replaySessionStatus,
       workflowId: state.workflowId,
       stepCount: state.steps.length,
       replayIndex: state.replayIndex,
+      recoveryAttempts: state.recoveryAttempts,
     };
   },
 
@@ -582,5 +651,13 @@ function generateId() {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (state.mode === 'replaying' && tabId === state.activeTabId && changeInfo.status === 'complete') {
     // Page finished loading during replay — content script will inject and send REPLAY_READY
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (state.mode === 'replaying' && tabId === state.activeTabId) {
+    abortReplaySession('tab_closed', 'Replay tab was closed during active session').catch((err) => {
+      console.warn('[Trigger] Failed to abort replay after tab removal:', err.message);
+    });
   }
 });
