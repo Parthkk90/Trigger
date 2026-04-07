@@ -109,6 +109,7 @@ function createDOM(html) {
 function createChromeMock() {
   const listeners = {};
   const storage = { local: {}, session: {} };
+  const storageWrites = { local: 0, session: 0 };
 
   return {
     runtime: {
@@ -126,6 +127,7 @@ function createChromeMock() {
         },
         set: function (obj) {
           Object.assign(storage.local, obj);
+          storageWrites.local += 1;
           return Promise.resolve();
         },
       },
@@ -135,6 +137,7 @@ function createChromeMock() {
         },
         set: function (obj) {
           Object.assign(storage.session, obj);
+          storageWrites.session += 1;
           return Promise.resolve();
         },
       },
@@ -147,38 +150,47 @@ function createChromeMock() {
     },
     _listeners: listeners,
     _storage: storage,
+    _storageWrites: storageWrites,
   };
 }
 
 // ── Load source files into JSDOM context ─────────────────────────
 
 function loadContentScripts(window) {
-  const files = [
-    'content/fingerprint.js',
-    'content/overlay.js',
-    'content/recorder.js',
-    'content/replay.js',
-  ];
+  // Load the built bundle — source files use ES modules (bundled by esbuild to IIFE)
+  const builtBundle = path.join(__dirname, '..', 'dist', 'extension', 'content', 'content.js');
+  const code = fs.readFileSync(builtBundle, 'utf8');
+  const fn = new Function('window', 'document', 'chrome', 'CSS', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'getComputedStyle', 'XPathResult', 'Node', 'Promise', 'MouseEvent', 'KeyboardEvent', 'Event', 'history',
+    code
+  );
+  fn(
+    window, window.document, window.chrome, window.CSS,
+    window.setTimeout, window.clearTimeout,
+    window.setInterval, window.clearInterval,
+    window.getComputedStyle,
+    window.XPathResult, window.Node, window.Promise,
+    window.MouseEvent, window.KeyboardEvent, window.Event,
+    window.history
+  );
+}
 
-  for (const file of files) {
-    const code = fs.readFileSync(
-      path.join(__dirname, '..', 'extension', file),
-      'utf8'
-    );
-    // Execute in window context
-    const fn = new Function('window', 'document', 'chrome', 'CSS', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'getComputedStyle', 'XPathResult', 'Node', 'Promise', 'MouseEvent', 'KeyboardEvent', 'Event', 'history',
-      code
-    );
-    fn(
-      window, window.document, window.chrome, window.CSS,
-      window.setTimeout, window.clearTimeout,
-      window.setInterval, window.clearInterval,
-      window.getComputedStyle,
-      window.XPathResult, window.Node, window.Promise,
-      window.MouseEvent, window.KeyboardEvent, window.Event,
-      window.history
-    );
-  }
+function loadInjectorScript(window) {
+  const code = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'extension', 'content', 'index.js'),
+    'utf8'
+  );
+  const fn = new Function('window', 'document', 'chrome', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
+    code
+  );
+  fn(
+    window,
+    window.document,
+    window.chrome,
+    window.setTimeout,
+    window.clearTimeout,
+    window.setInterval,
+    window.clearInterval
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -208,7 +220,7 @@ async function runAllTests() {
 
   // ── 5. Recorder ──
   suite('Recorder');
-  testRecorder();
+  await testRecorder();
 
   // ── 6. Replay Engine ──
   suite('Replay Engine');
@@ -230,6 +242,10 @@ async function runAllTests() {
   suite('Integration — Record & Resolve Round-trip');
   testRoundTrip();
 
+  // ── 11. Credential Parameterization ──
+  suite('Credential Parameterization');
+  await testCredentialParameterization();
+
   // ── Summary ──
   console.log('\n\x1b[1m══════════════════════════════════════\x1b[0m');
   console.log(`  \x1b[32m${passed} passed\x1b[0m, \x1b[${failed > 0 ? '31' : '32'}m${failed} failed\x1b[0m`);
@@ -247,7 +263,7 @@ async function runAllTests() {
 // ── 1. Manifest Tests ────────────────────────────────────────────
 
 function testManifest() {
-  const manifestPath = path.join(__dirname, '..', 'extension', 'manifest.json');
+  const manifestPath = path.join(__dirname, '..', 'src', 'extension', 'manifest.json');
 
   test('manifest.json is valid JSON', () => {
     const raw = fs.readFileSync(manifestPath, 'utf8');
@@ -268,14 +284,14 @@ function testManifest() {
   });
 
   test('background service worker exists', () => {
-    const swPath = path.join(__dirname, '..', 'extension', manifest.background.service_worker);
+    const swPath = path.join(__dirname, '..', 'src', 'extension', manifest.background.service_worker);
     assert(fs.existsSync(swPath), 'service-worker.js not found');
   });
 
   test('all content scripts exist', () => {
     const scripts = manifest.content_scripts[0].js;
     for (const script of scripts) {
-      const p = path.join(__dirname, '..', 'extension', script);
+      const p = path.join(__dirname, '..', 'src', 'extension', script);
       assert(fs.existsSync(p), `Missing: ${script}`);
     }
   });
@@ -283,28 +299,30 @@ function testManifest() {
   test('content scripts load in correct order', () => {
     const scripts = manifest.content_scripts[0].js;
     assertEqual(scripts[0], 'content/fingerprint.js', 'fingerprint should load first');
-    assertEqual(scripts[scripts.length - 1], 'content/injector.js', 'injector should load last');
+    assertEqual(scripts[scripts.length - 1], 'content/index.js', 'injector should load last');
   });
 
   test('all icon files exist', () => {
     for (const size of ['16', '48', '128']) {
-      const p = path.join(__dirname, '..', 'extension', `icons/icon-${size}.png`);
+      const p = path.join(__dirname, '..', 'src', 'extension', `icons/icon-${size}.png`);
       assert(fs.existsSync(p), `Missing icon-${size}.png`);
     }
   });
 
   test('popup HTML exists', () => {
-    const p = path.join(__dirname, '..', 'extension', manifest.action.default_popup);
+    const p = path.join(__dirname, '..', 'src', 'extension', manifest.action.default_popup);
     assert(fs.existsSync(p), 'popup.html not found');
   });
 
   test('no import/export in content scripts', () => {
-    const scripts = manifest.content_scripts[0].js;
-    for (const script of scripts) {
-      const code = fs.readFileSync(path.join(__dirname, '..', 'extension', script), 'utf8');
-      assert(!/\bimport\s/.test(code), `ES import found in ${script}`);
-      assert(!/\bexport\s/.test(code), `ES export found in ${script}`);
+    // Check the built bundle (dist/) not source — source uses ES modules bundled by esbuild to IIFE
+    const builtBundle = path.join(__dirname, '..', 'dist', 'extension', 'content', 'content.js');
+    if (fs.existsSync(builtBundle)) {
+      const code = fs.readFileSync(builtBundle, 'utf8');
+      assert(!/^\s*import\s/m.test(code), 'ES import found in built content bundle');
+      assert(!/^\s*export\s/m.test(code), 'ES export found in built content bundle');
     }
+    // Source files may use ES modules (bundled by esbuild)
   });
 }
 
@@ -317,23 +335,28 @@ function testSyntax() {
     'content/overlay.js',
     'content/recorder.js',
     'content/replay.js',
-    'content/injector.js',
+    'content/index.js',
     'popup/popup.js',
   ];
 
   for (const file of jsFiles) {
     test(`${file} has no syntax errors`, () => {
       const code = fs.readFileSync(
-        path.join(__dirname, '..', 'extension', file),
+        path.join(__dirname, '..', 'src', 'extension', file),
         'utf8'
       );
       // Attempt to parse as a function body (catches syntax errors)
-      // For service-worker.js which uses top-level await (import), skip Function parse
+      // Files using ES module syntax (import/export) can't be wrapped in new Function()
+      // For those, verify they are non-empty and have expected markers
       if (file.includes('service-worker')) {
-        // service worker uses top-level const, async, etc.
-        // Just verify it's non-empty and has expected markers
-        assertIncludes(code, 'chrome.runtime.onMessage', 'missing message listener');
+        assertIncludes(code, '_browser.runtime.onMessage', 'missing message listener');
         assertIncludes(code, 'messageHandlers', 'missing messageHandlers');
+        return;
+      }
+      if (file.includes('fingerprint')) {
+        // fingerprint.js is now an ES module bridge (import/export syntax)
+        assertIncludes(code, 'window.Trigger', 'missing window.Trigger assignment');
+        assertIncludes(code, 'resolveFingerprint', 'missing resolveFingerprint');
         return;
       }
       try {
@@ -549,7 +572,7 @@ function testFingerprintResolution() {
 
 // ── 5. Recorder Tests ────────────────────────────────────────────
 
-function testRecorder() {
+async function testRecorder() {
   const { window, document } = createDOM(`
     <html><body>
       <button id="test-btn">Click Me</button>
@@ -586,6 +609,57 @@ function testRecorder() {
     assert(sentMessages.length >= 1, 'Should have captured click');
     assertEqual(sentMessages[0].step.type, 'click');
     assertIncludes(sentMessages[0].step.target.text, 'Click Me');
+  });
+
+  test('popstate during recording does not drop click capture', () => {
+    sentMessages.length = 0;
+
+    window.dispatchEvent(new window.PopStateEvent('popstate'));
+
+    const btn = document.getElementById('test-btn');
+    btn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+
+    const clickMsg = sentMessages.find(m => m.step && m.step.type === 'click');
+    assert(clickMsg, 'Click capture should continue after popstate re-attachment');
+  });
+
+  await testAsync('screenshotAnchor is populated when capture succeeds', async () => {
+    sentMessages.length = 0;
+
+    const btn = document.getElementById('test-btn');
+    const originalRect = btn.getBoundingClientRect;
+    btn.getBoundingClientRect = function () {
+      return {
+        left: 10,
+        top: 20,
+        width: 80,
+        height: 24,
+        right: 90,
+        bottom: 44,
+        x: 10,
+        y: 20,
+      };
+    };
+
+    window.html2canvas = function () {
+      return Promise.resolve({
+        toDataURL: function () {
+          return 'data:image/png;base64,TEST_ANCHOR';
+        },
+      });
+    };
+
+    try {
+      btn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+      await new Promise(resolve => setTimeout(resolve, 25));
+
+      const clickMsg = sentMessages.find(m => m.step && m.step.type === 'click');
+      assert(clickMsg, 'Should capture click step');
+      assertEqual(clickMsg.step.screenshotAnchor, 'data:image/png;base64,TEST_ANCHOR');
+    } finally {
+      delete window.html2canvas;
+      btn.getBoundingClientRect = originalRect;
+    }
   });
 
   test('input events are captured (debounced)', (done) => {
@@ -731,6 +805,31 @@ async function testReplay() {
     assert(result.success, 'Navigate step should succeed');
   });
 
+  await testAsync('navigate auth-wall mismatch triggers auth_wall reason type', async () => {
+    window.history.replaceState({}, '', 'https://example.com/login');
+    const pw = document.createElement('input');
+    pw.type = 'password';
+    document.body.appendChild(pw);
+
+    const result = await T.executeStep({ type: 'navigate', url: 'https://example.com/dashboard' }, 0, 1);
+    assertEqual(result.success, false, 'Navigate should fail on auth wall');
+    assertEqual(result.reasonType, 'auth_wall', 'Auth wall should map to auth_wall reason type');
+
+    pw.remove();
+    window.history.replaceState({}, '', 'https://example.com/test');
+  });
+
+  await testAsync('transient redirect within 500ms does not trigger auth_wall', async () => {
+    window.history.replaceState({}, '', 'https://example.com/login');
+
+    setTimeout(() => {
+      window.history.replaceState({}, '', 'https://example.com/dashboard');
+    }, 200);
+
+    const result = await T.executeStep({ type: 'navigate', url: 'https://example.com/dashboard' }, 0, 1);
+    assertEqual(result.success, true, 'Transient redirect should settle before auth-wall detection');
+  });
+
   await testAsync('executeStep clicks a found element', async () => {
     const btn = document.getElementById('replay-btn');
     const fp = T.generateFingerprint(btn);
@@ -751,6 +850,22 @@ async function testReplay() {
     }, 0, 1);
     assert(result.success, `Input step should succeed, got: ${result.reason}`);
     assertEqual(input.value, 'hi', 'Input value should be "hi"');
+  });
+
+  await testAsync('executeStep pauses when CAPTCHA iframe is detected', async () => {
+    const captchaFrame = document.createElement('iframe');
+    captchaFrame.setAttribute('src', 'https://www.google.com/recaptcha/api2/anchor');
+    document.body.appendChild(captchaFrame);
+
+    const btn = document.getElementById('replay-btn');
+    const fp = T.generateFingerprint(btn);
+    const result = await T.executeStep({ type: 'click', target: fp }, 0, 1);
+
+    assertEqual(result.success, false, 'Replay should pause on CAPTCHA');
+    assertEqual(result.reasonType, 'captcha_challenge', 'Reason type should classify CAPTCHA correctly');
+    assertIncludes(result.reason, 'CAPTCHA challenge detected', 'Reason should explain manual solve flow');
+
+    captchaFrame.remove();
   });
 
   test('abortReplay sets aborted flag', () => {
@@ -841,6 +956,99 @@ function testOverlay() {
     T.destroyOverlay();
   });
 
+  test('showAssistPanel renders screenshot anchor image when present', () => {
+    T.showAssistPanel(
+      {
+        step: { type: 'click', target: { text: 'Submit' }, screenshotAnchor: 'data:image/png;base64,ANCHOR' },
+        index: 1,
+        total: 5,
+        reason: 'Element not found',
+        reasonType: 'selector_not_found',
+        retries: 1,
+        maxRetries: 3,
+      }
+    );
+    const overlay = document.getElementById('trigger-overlay');
+    const shadow = overlay.shadowRoot;
+    const img = shadow.querySelector('.assist-anchor');
+    assert(img, 'Anchor image should render when screenshotAnchor is present');
+    assertEqual(img.getAttribute('src'), 'data:image/png;base64,ANCHOR');
+    T.destroyOverlay();
+  });
+
+  test('showAssistPanel renders normally without screenshot anchor', () => {
+    T.showAssistPanel(
+      {
+        step: { type: 'click', target: { text: 'Submit' } },
+        index: 1,
+        total: 5,
+        reason: 'Element not found',
+        reasonType: 'selector_not_found',
+        retries: 1,
+        maxRetries: 3,
+      }
+    );
+    const overlay = document.getElementById('trigger-overlay');
+    const shadow = overlay.shadowRoot;
+    const assist = shadow.getElementById('trigger-assist');
+    const img = shadow.querySelector('.assist-anchor');
+    assertEqual(assist.style.display, 'block', 'Assist panel should still display');
+    assert(!img, 'Anchor image should be absent when screenshotAnchor missing');
+    T.destroyOverlay();
+  });
+
+  test('showCredentialPrompt updates status text while waiting', () => {
+    T.createOverlay('replaying');
+    T.showCredentialPrompt({
+      prompts: [{ key: 'username', label: 'Username' }],
+      onSubmit: function () {},
+      onCancel: function () {},
+    });
+
+    const shadow = document.getElementById('trigger-overlay').shadowRoot;
+    const status = shadow.getElementById('trigger-status');
+    const panel = shadow.getElementById('trigger-credentials');
+    assertEqual(panel.getAttribute('role'), 'dialog');
+    assertEqual(panel.getAttribute('aria-modal'), 'true');
+    assertEqual(panel.getAttribute('aria-label'), 'Credential prompt');
+    assertEqual(status.textContent, 'Waiting for credentials…');
+    T.destroyOverlay();
+  });
+
+  test('showDriftWarning displays proceed/cancel prompt', () => {
+    T.createOverlay('replaying');
+    T.showDriftWarning({ onProceed: function () {}, onCancel: function () {} });
+
+    const shadow = document.getElementById('trigger-overlay').shadowRoot;
+    const panel = shadow.getElementById('trigger-drift');
+    assertEqual(panel.style.display, 'block');
+    assertEqual(panel.getAttribute('role'), 'dialog');
+    assertEqual(panel.getAttribute('aria-modal'), 'true');
+    assertEqual(panel.getAttribute('aria-label'), 'DOM drift warning');
+    assertIncludes(panel.textContent, 'Potential DOM Drift Detected');
+    assertIncludes(panel.textContent, 'Proceed anyway');
+    T.destroyOverlay();
+  });
+
+  test('showAssistPanel includes accessible dialog attributes', () => {
+    T.showAssistPanel({
+      step: { type: 'click', target: { text: 'Submit' } },
+      index: 0,
+      total: 1,
+      reason: 'Element not found',
+      reasonType: 'selector_not_found',
+      retries: 0,
+      maxRetries: 3,
+    });
+
+    const shadow = document.getElementById('trigger-overlay').shadowRoot;
+    const panel = shadow.getElementById('trigger-assist');
+    assertEqual(panel.getAttribute('role'), 'dialog');
+    assertEqual(panel.getAttribute('aria-modal'), 'true');
+    assertEqual(panel.getAttribute('aria-label'), 'Replay assist panel');
+    T.destroyOverlay();
+  });
+
   test('showCompletionToast shows success toast', () => {
     T.showCompletionToast();
     const overlay = document.getElementById('trigger-overlay');
@@ -879,7 +1087,7 @@ async function testServiceWorker() {
   // but we can test the logic patterns by evaluating specific functions.
 
   const swCode = fs.readFileSync(
-    path.join(__dirname, '..', 'extension', 'background', 'service-worker.js'),
+    path.join(__dirname, '..', 'src', 'extension', 'background', 'service-worker.js'),
     'utf8'
   );
 
@@ -911,7 +1119,7 @@ async function testServiceWorker() {
     const expectedHandlers = [
       'START_RECORDING', 'STOP_RECORDING', 'RECORD_STEP',
       'START_REPLAY', 'REPLAY_READY', 'STEP_COMPLETED',
-      'STOP_REPLAY', 'STEP_FAILED', 'GET_STATE',
+      'STOP_REPLAY', 'STEP_FAILED', 'SUBMIT_REPLAY_CREDENTIALS', 'DOM_DRIFT_DECISION', 'GET_STATE',
       'GET_WORKFLOWS', 'DELETE_WORKFLOW', 'REPLAY_HEARTBEAT', 'ASSIST_ACTION',
     ];
     for (const handler of expectedHandlers) {
@@ -935,14 +1143,27 @@ async function testServiceWorker() {
     assertIncludes(swCode, "type: 'SHOW_ASSIST'");
   });
 
-  test('state is persisted to chrome.storage.session', () => {
-    assertIncludes(swCode, 'chrome.storage.session.set');
-    assertIncludes(swCode, 'chrome.storage.session.get');
+  test('auth-wall failures are classified and routed as assist reasons', () => {
+    assertIncludes(swCode, "return 'auth_wall'");
+    assertIncludes(swCode, 'reasonType,');
+    assertIncludes(swCode, "type: 'SHOW_ASSIST'");
   });
 
-  test('workflows stored in chrome.storage.local', () => {
-    assertIncludes(swCode, 'chrome.storage.local.get');
-    assertIncludes(swCode, 'chrome.storage.local.set');
+  test('pre-replay DOM drift check is requested before first step', () => {
+    assertIncludes(swCode, "type: 'CHECK_DOM_DRIFT'");
+    assertIncludes(swCode, 'REPLAY_FRESHNESS_THRESHOLD = 60');
+    assertIncludes(swCode, "'DOM_DRIFT_DECISION': async");
+  });
+
+  test('state persistence supports session fallback for Firefox', () => {
+    assertIncludes(swCode, 'sessionStorageSet({ triggerState: state })');
+    assertIncludes(swCode, "sessionStorageGet('triggerState')");
+    assertIncludes(swCode, "SESSION_STORAGE_PREFIX = 'session_'");
+  });
+
+  test('workflows stored in extension local storage', () => {
+    assertIncludes(swCode, '_browser.storage.local.get');
+    assertIncludes(swCode, '_browser.storage.local.set');
   });
 
   test('message router returns true for async handlers', () => {
@@ -955,21 +1176,139 @@ async function testServiceWorker() {
   });
 
   test('START_REPLAY opens new tab with startUrl', () => {
-    assertIncludes(swCode, 'chrome.tabs.create({ url: workflow.startUrl })');
+    assertIncludes(swCode, '_browser.tabs.create({ url: workflow.startUrl })');
   });
 
   test('tab removal listener aborts active replay', () => {
-    assertIncludes(swCode, 'chrome.tabs.onRemoved.addListener');
+    assertIncludes(swCode, '_browser.tabs.onRemoved.addListener');
     assertIncludes(swCode, "abortReplaySession('tab_closed'");
+  });
+}
+
+// ── 11. Credential Parameterization Tests ───────────────────────
+
+async function testCredentialParameterization() {
+  const { window } = createDOM('<html><body><input id="email" type="text" name="email" /></body></html>');
+  loadContentScripts(window);
+
+  const sentMessages = [];
+  let reReadyCount = 0;
+  let submittedCredentialValues = null;
+  let executedStep = null;
+
+  window.chrome.runtime.sendMessage = function (msg) {
+    sentMessages.push(msg);
+
+    if (msg.type === 'GET_STATE') {
+      return Promise.resolve({ mode: 'replaying' });
+    }
+
+    if (msg.type === 'REPLAY_READY') {
+      reReadyCount += 1;
+      if (reReadyCount === 1) {
+        return Promise.resolve({
+          type: 'REQUEST_CREDENTIALS',
+          prompts: [{ key: 'email', label: 'Email Address', stepIndices: [0] }],
+        });
+      }
+      return Promise.resolve({ type: 'REPLAY_COMPLETE' });
+    }
+
+    if (msg.type === 'SUBMIT_REPLAY_CREDENTIALS') {
+      return Promise.resolve({
+        type: 'EXECUTE_STEP',
+        step: {
+          type: 'input',
+          sensitive: true,
+          value: '',
+          _credentialKey: 'email',
+          target: { name: 'email' },
+        },
+        index: 0,
+        total: 1,
+      });
+    }
+
+    if (msg.type === 'STEP_COMPLETED') {
+      return Promise.resolve({ type: 'REPLAY_COMPLETE' });
+    }
+
+    return Promise.resolve({ ok: true });
+  };
+
+  window.Trigger.showCredentialPrompt = function (payload) {
+    submittedCredentialValues = { email: 'user@example.com' };
+    payload.onSubmit(submittedCredentialValues);
+  };
+
+  window.Trigger.executeStep = function (step) {
+    executedStep = step;
+    return Promise.resolve({ success: true, confidence: 100 });
+  };
+
+  loadInjectorScript(window);
+
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  await testAsync('sensitive replay flow triggers pre-replay credential prompt', async () => {
+    assert(sentMessages.some(m => m.type === 'REPLAY_READY'), 'REPLAY_READY should be sent');
+    assert(sentMessages.some(m => m.type === 'SUBMIT_REPLAY_CREDENTIALS'), 'Credentials handshake should be submitted');
+    assert(submittedCredentialValues, 'Credential prompt should collect values');
+  });
+
+  await testAsync('credential values are injected into executor step in memory', async () => {
+    assert(executedStep, 'executeStep should be invoked');
+    assertEqual(executedStep.type, 'input');
+    assertEqual(executedStep.sensitive, false, 'Sensitive flag should be cleared for injected run');
+    assertEqual(executedStep.value, 'user@example.com', 'Injected value should be forwarded to executor');
+    assertEqual(executedStep._credentialInjected, true, 'Injection marker should be present');
+  });
+
+  await testAsync('credential flow does not write values to extension storage', async () => {
+    assertEqual(window.chrome._storageWrites.local, 0, 'No local storage writes expected');
+    assertEqual(window.chrome._storageWrites.session, 0, 'No session storage writes expected');
+  });
+
+  await testAsync('low freshness confidence triggers DOM drift warning before replay', async () => {
+    const { window } = createDOM();
+    loadContentScripts(window);
+
+    let warned = false;
+    window.chrome.runtime.sendMessage = function (msg) {
+      if (msg.type === 'GET_STATE') return Promise.resolve({ mode: 'replaying' });
+      if (msg.type === 'REPLAY_READY') {
+        return Promise.resolve({
+          type: 'CHECK_DOM_DRIFT',
+          threshold: 60,
+          sampleSteps: [{ index: 0, type: 'click', target: { text: 'Save' } }],
+        });
+      }
+      return Promise.resolve({ ok: true });
+    };
+
+    window.Trigger.evaluateReplayFreshness = function () {
+      return { averageConfidence: 30, sampledCount: 1, details: [{ stepIndex: 0, confidence: 30 }] };
+    };
+    window.Trigger.showDriftWarning = function () {
+      warned = true;
+    };
+    window.Trigger.executeStep = function () {
+      return Promise.resolve({ success: true });
+    };
+
+    loadInjectorScript(window);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    assertEqual(warned, true, 'DOM drift warning should be shown below threshold');
   });
 }
 
 // ── 9. Popup Tests ───────────────────────────────────────────────
 
 function testPopup() {
-  const htmlPath = path.join(__dirname, '..', 'extension', 'popup', 'popup.html');
+  const htmlPath = path.join(__dirname, '..', 'src', 'extension', 'popup', 'popup.html');
   const html = fs.readFileSync(htmlPath, 'utf8');
-  const jsPath = path.join(__dirname, '..', 'extension', 'popup', 'popup.js');
+  const jsPath = path.join(__dirname, '..', 'src', 'extension', 'popup', 'popup.js');
   const js = fs.readFileSync(jsPath, 'utf8');
 
   test('popup HTML has required elements', () => {
@@ -979,6 +1318,7 @@ function testPopup() {
     assertIncludes(html, 'id="status-text"');
     assertIncludes(html, 'id="workflow-list"');
     assertIncludes(html, 'id="btn-record"');
+    assertIncludes(html, 'id="btn-settings"');
   });
 
   test('popup HTML loads popup.js', () => {
@@ -1009,6 +1349,22 @@ function testPopup() {
   test('popup JS has export functionality', () => {
     assertIncludes(js, 'exportWorkflow');
     assertIncludes(js, 'application/json');
+  });
+
+  test('home actions expose two-click common flows', () => {
+    assertIncludes(js, 'data-action="play"');
+    assertIncludes(js, 'data-action="share"');
+    assertIncludes(js, 'data-action="delete"');
+    assertIncludes(js, "case 'play':");
+    assertIncludes(js, "case 'share':");
+    assertIncludes(js, "startRecording");
+  });
+
+  test('icon-only controls include aria labels', () => {
+    assertIncludes(html, 'aria-label="Open Settings"');
+    assertIncludes(js, 'aria-label="Play workflow');
+    assertIncludes(js, 'aria-label="Share workflow');
+    assertIncludes(js, 'aria-label="Delete workflow');
   });
 }
 
