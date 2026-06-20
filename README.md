@@ -1,4 +1,4 @@
-# Trigger — Workflow Recorder & Replay Extension
+# Trigger - Workflow Recorder & Replay Extension
 
 Record user interactions on any website and replay them automatically. Share workflows with others as executable links.
 
@@ -43,7 +43,7 @@ Record user interactions on any website and replay them automatically. Share wor
 2. Find the workflow you want to share
 3. Click the **🔗 Share** button
 4. A shareable link is copied to your clipboard
-5. Send the link to anyone — they can:
+5. Send the link to anyone - they can:
    - View the workflow steps
    - Export as JSON
    - Execute it if using the Chrome extension
@@ -208,6 +208,21 @@ node tests/run-tests.js
 - Viewer URL parsing, backend resolution, and extension handoff
 - Backend API validation and share-link resolution
 
+## 🗄️ Backend Migrations and Auth
+
+- Apply pending backend migrations:
+  `npm --prefix backend run db:migrate`
+- Roll back the latest applied migration:
+  `npm --prefix backend run db:rollback`
+- Backend startup runs pending migrations automatically after pre-flight checks.
+- Optional API auth: set `TRIGGER_API_TOKEN` in `backend/.env`.
+  When set, all backend `POST` routes require `Authorization: Bearer <token>`.
+  `GET` routes remain public.
+- Cloud replay queue: set `REDIS_URL` in `backend/.env`.
+- Optional worker parallelism: set `PLAYWRIGHT_CONCURRENCY` (default `2`).
+- Start cloud replay worker:
+  `npm run worker:start`
+
 ## 🔐 Security & Privacy
 
 - **No tracking**: No phones home, entirely local
@@ -369,7 +384,7 @@ For a code-verified implementation status and delivery plan, see [IMPLEMENTATION
 
 ## 📝 License
 
-MIT — Use freely, modify as needed.
+MIT - Use freely, modify as needed.
 
 ## 🤝 Contributing
 
