@@ -6,3 +6,4 @@ backend/data/
 *.log
 .DS_Store
 .vscode/
+dist/
