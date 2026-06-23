@@ -1,6 +1,11 @@
-const esbuild = require('esbuild');
-const fs = require('fs');
-const path = require('path');
+import esbuild from 'esbuild';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const ROOT = path.resolve(__dirname, '..');
 const SRC = path.join(ROOT, 'src');
@@ -96,7 +101,7 @@ const targets = [
     name: 'backend',
     entryPoints: [path.join(SRC, 'backend', 'server.js')],
     outfile: path.join(DIST, 'backend', 'server.js'),
-    format: 'cjs',
+    format: 'esm',
     platform: 'node',
     external: ['pg', 'fastify', '@fastify/cors', 'nanoid', 'bullmq'],
   },
@@ -104,7 +109,7 @@ const targets = [
     name: 'worker',
     entryPoints: [path.join(SRC, 'workers', 'replay-worker.js')],
     outfile: path.join(DIST, 'workers', 'replay-worker.js'),
-    format: 'cjs',
+    format: 'esm',
     platform: 'node',
     external: ['playwright', 'bullmq'],
   },

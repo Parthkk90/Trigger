@@ -1,5 +1,5 @@
 /**
- * Trigger — Element Fingerprinting (Content Script Bridge)
+ * Trigger - Element Fingerprinting (Content Script Bridge)
  * Imports shared fingerprint engine and exposes on window.Trigger.
  */
 

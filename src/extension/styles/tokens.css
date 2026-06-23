@@ -1,0 +1,20 @@
+:root {
+  --trigger-color-primary: #0f62fe;
+  --trigger-color-primary-hover: #0043ce;
+  --trigger-color-surface: #ffffff;
+  --trigger-color-surface-muted: #f4f6fa;
+  --trigger-color-text-primary: #1f2937;
+  --trigger-color-text-secondary: #4b5563;
+  --trigger-color-border: #d0d7e2;
+  --trigger-radius-sm: 8px;
+  --trigger-radius-md: 12px;
+  --trigger-radius-lg: 16px;
+  --trigger-space-1: 4px;
+  --trigger-space-2: 8px;
+  --trigger-space-3: 12px;
+  --trigger-space-4: 16px;
+  --trigger-space-5: 20px;
+  --trigger-space-6: 24px;
+  --trigger-font-stack: "IBM Plex Sans", "Segoe UI", "Inter", system-ui, -apple-system, sans-serif;
+  --trigger-focus-ring: 0 0 0 3px rgba(15, 98, 254, 0.35);
+}

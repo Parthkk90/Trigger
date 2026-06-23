@@ -1,5 +1,5 @@
 /**
- * Trigger — Content Script Bundle Entry Point
+ * Trigger - Content Script Bundle Entry Point
  *
  * This file is the esbuild entry point only.
  * It imports all content modules as side effects so they register

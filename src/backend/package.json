@@ -1,0 +1,10 @@
+{
+  "name": "trigger-backend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "db:migrate": "node migrate.js",
+    "db:rollback": "node rollback.js"
+  }
+}
