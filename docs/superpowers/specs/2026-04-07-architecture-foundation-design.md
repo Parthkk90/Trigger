@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-07
 **Status:** Approved
-**Scope:** Developer experience / structural refactor — no feature changes
+**Scope:** Developer experience / structural refactor - no feature changes
 
 ---
 
@@ -12,11 +12,11 @@ Add an esbuild build pipeline, restructure source into ES modules with shared co
 
 ## Constraints
 
-- JavaScript only — no TypeScript
+- JavaScript only - no TypeScript
 - No new frameworks or libraries (except esbuild as a dev dependency)
 - No changes to workflow JSON format
-- No behavioral changes — recording, replay, and sharing work identically
-- No monorepo/workspaces — single package.json
+- No behavioral changes - recording, replay, and sharing work identically
+- No monorepo/workspaces - single package.json
 - Solo tool target, structured for eventual public Chrome Web Store release
 
 ---
@@ -125,7 +125,7 @@ Added as a dev dependency. Sub-50ms builds, native ESM support, zero config for 
 - Copies static assets: `manifest.json`, `popup.html`, `viewer/index.html`, `icons/`, `extension/styles/`
 - Patches `manifest.json` at build time: replaces the 5-file content script array with single `content/content.js`
 - Watch mode: `--watch` flag for development
-- No build-time env var injection — config is runtime-resolved (Chrome Web Store safe)
+- No build-time env var injection - config is runtime-resolved (Chrome Web Store safe)
 
 ### npm Scripts
 
@@ -148,14 +148,14 @@ Added as a dev dependency. Sub-50ms builds, native ESM support, zero config for 
 
 The current 1032-line `service-worker.js` splits into 5 modules:
 
-### `service-worker.js` (~150 lines) — Entry & router
+### `service-worker.js` (~150 lines) - Entry & router
 
 - Imports all handler modules
 - `_browser.runtime.onMessage.addListener` with dispatch table
 - `initializeBackgroundState()` startup
 - Keepalive interval management (`startKeepalive`, `stopKeepalive`)
 
-### `storage.js` (~100 lines) — Storage abstraction
+### `storage.js` (~100 lines) - Storage abstraction
 
 - `sessionStorageGet` / `sessionStorageSet` with native/fallback logic
 - `clearSessionFallbackOnStartup`
@@ -163,7 +163,7 @@ The current 1032-line `service-worker.js` splits into 5 modules:
 - `persistState`, `restoreState`
 - `getBackendUrl`, `sanitizeUrl`
 
-### `replay-state.js` (~250 lines) — Replay state machine
+### `replay-state.js` (~250 lines) - Replay state machine
 
 - The `state` object definition and replay orchestration
 - Handlers: `START_REPLAY`, `START_REPLAY_INLINE`, `REPLAY_READY`, `STEP_COMPLETED`, `STEP_FAILED`, `DOM_DRIFT_DECISION`, `SUBMIT_REPLAY_CREDENTIALS`, `STOP_REPLAY`
@@ -172,14 +172,14 @@ The current 1032-line `service-worker.js` splits into 5 modules:
 - Freshness check: `buildReplayFreshnessSample`, `replayFreshnessCheck` state
 - `getReplayResponseForCurrentIndex`, `getReplayResponseForCompletedIndex`, `prepareStepForExecution`
 
-### `upload-queue.js` (~100 lines) — Upload retry queue
+### `upload-queue.js` (~100 lines) - Upload retry queue
 
 - `enqueueUploadRetry`, `processUploadRetryQueue`
 - `scheduleUploadRetryWorker`, `computeUploadBackoffMs`
 - `getUploadRetryQueue`, `setUploadRetryQueue`
 - `uploadWorkflowRemote`
 
-### `recording.js` (~80 lines) — Recording handlers
+### `recording.js` (~80 lines) - Recording handlers
 
 - Handlers: `START_RECORDING`, `STOP_RECORDING`, `RECORD_STEP`
 - Workflow assembly on stop (build workflow object, save, attempt remote upload)
@@ -194,9 +194,9 @@ The current 1032-line `service-worker.js` splits into 5 modules:
 Extracted from the current content script IIFE. Same logic, ES module exports:
 
 **Exports:**
-- `generateFingerprint(element)` — used by recorder (extension) and cloud worker
-- `resolveFingerprint(fingerprint)` — used by replay (extension) and cloud worker
-- `scoreCandidateMatch(element, fp)` — used internally + freshness evaluation
+- `generateFingerprint(element)` - used by recorder (extension) and cloud worker
+- `resolveFingerprint(fingerprint)` - used by replay (extension) and cloud worker
+- `scoreCandidateMatch(element, fp)` - used internally + freshness evaluation
 
 **Private (not exported):**
 - `gatherCandidates`, `getVisibleText`, `inferRole`, `buildUniqueSelector`, `getXPath`, `isElementVisible`, `isGeneratedClass`
@@ -208,10 +208,10 @@ Content script's `index.js` imports these and assigns to `window.Trigger.*` duri
 Currently scattered across service-worker.js and viewer.js:
 
 **Exports:**
-- `validateReplayWorkflow(workflow)` — from service-worker.js ~line 279
-- `buildReplayFreshnessSample(steps)` — from service-worker.js ~line 295
-- `classifyFailure(reason, reasonType)` — from service-worker.js ~line 305
-- `isRetryableFailure(reasonType)` — from service-worker.js ~line 318
+- `validateReplayWorkflow(workflow)` - from service-worker.js ~line 279
+- `buildReplayFreshnessSample(steps)` - from service-worker.js ~line 295
+- `classifyFailure(reason, reasonType)` - from service-worker.js ~line 305
+- `isRetryableFailure(reasonType)` - from service-worker.js ~line 318
 - Step type constants: `STEP_TYPES = ['click', 'input', 'select', 'check', 'keypress', 'navigate']`
 
 ### `src/shared/constants.js`
@@ -271,10 +271,10 @@ Six incremental steps. Each is independently verifiable: load extension, run tes
 
 ### Step 3: Extract shared modules (one commit per module)
 
-1. Create `src/shared/constants.js` — extract hardcoded values, import in all files
-2. Create `src/shared/workflow-schema.js` — extract validation + classification
-3. Create `src/shared/fingerprint.js` — extract from IIFE, content `index.js` bridges to `window.Trigger.*`
-4. Create `src/shared/config.js` — extract backend URL resolution
+1. Create `src/shared/constants.js` - extract hardcoded values, import in all files
+2. Create `src/shared/workflow-schema.js` - extract validation + classification
+3. Create `src/shared/fingerprint.js` - extract from IIFE, content `index.js` bridges to `window.Trigger.*`
+4. Create `src/shared/config.js` - extract backend URL resolution
 5. Verify: all tests pass, extension loads, behavior unchanged
 
 ### Step 4: Decompose service worker (one commit per module)
@@ -300,13 +300,13 @@ Six incremental steps. Each is independently verifiable: load extension, run tes
 2. Remove old `extension/` source directory (now lives in `src/extension/`)
 3. Add `dist/` to `.gitignore`
 4. Update README with new build instructions
-5. Verify: full end-to-end — build, load extension, record, replay, share, tests
+5. Verify: full end-to-end - build, load extension, record, replay, share, tests
 
 ### Risk mitigation
 
 - Each step is a single revertable commit
 - Step 3 uses a `window.Trigger` bridge so content scripts work during transition
-- No big-bang switchover — the extension works at every intermediate state
+- No big-bang switchover - the extension works at every intermediate state
 - If any step breaks, it's a single file move or import change to revert
 
 ---
@@ -316,7 +316,7 @@ Six incremental steps. Each is independently verifiable: load extension, run tes
 - Tests currently import source files directly using `require` with jsdom
 - After migration: tests import from `src/` for fast iteration
 - CI command: `npm run build && npm test` runs against `dist/`
-- No test framework change — jsdom + custom runner stays
+- No test framework change - jsdom + custom runner stays
 - The `window.Trigger` mocking pattern in tests works until step 5, then tests import functions directly
 - Test file paths update once (step 2) when source moves to `src/`
 
@@ -344,4 +344,5 @@ Six incremental steps. Each is independently verifiable: load extension, run tes
 4. No file in `src/` exceeds 300 lines
 5. `src/shared/fingerprint.js` is imported by both extension content scripts and cloud worker
 6. Service worker entry point (`src/extension/background/service-worker.js`) is under 200 lines
-7. Zero behavioral regressions — record, replay, share, export all work identically
+7. Zero behavioral regressions - record, replay, share, export all work identically
+

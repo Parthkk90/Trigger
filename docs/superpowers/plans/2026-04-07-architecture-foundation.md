@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add an esbuild build pipeline, restructure source into ES modules with shared code, and decompose the service worker into focused modules — with zero behavioral changes.
+**Goal:** Add an esbuild build pipeline, restructure source into ES modules with shared code, and decompose the service worker into focused modules - with zero behavioral changes.
 
 **Architecture:** Source moves to `src/`, esbuild bundles 6 targets to `dist/`. Shared modules (`fingerprint`, `workflow-schema`, `constants`, `config`) are imported by extension, viewer, and cloud worker. Service worker splits from 1 file into 5 focused modules.
 
@@ -16,7 +16,7 @@
 
 | File | Responsibility |
 |------|---------------|
-| `scripts/build.js` | esbuild build config — 6 targets, asset copy, manifest patching, watch mode |
+| `scripts/build.js` | esbuild build config - 6 targets, asset copy, manifest patching, watch mode |
 | `src/shared/constants.js` | All hardcoded threshold/timing values |
 | `src/shared/workflow-schema.js` | Workflow validation, failure classification, step types |
 | `src/shared/fingerprint.js` | Fingerprint generation, resolution, scoring |
@@ -116,7 +116,7 @@ function copyDir(src, dest) {
 }
 
 function copyAssets() {
-  // Manifest — patch content_scripts to use single bundle
+  // Manifest - patch content_scripts to use single bundle
   const manifest = JSON.parse(
     fs.readFileSync(path.join(SRC, 'extension', 'manifest.json'), 'utf8')
   );
@@ -287,13 +287,13 @@ Replace the `"scripts"` section:
 }
 ```
 
-- [ ] **Step 5: Verify build script runs (will fail since `src/` doesn't exist yet — expected)**
+- [ ] **Step 5: Verify build script runs (will fail since `src/` doesn't exist yet - expected)**
 
 ```bash
 node scripts/build.js
 ```
 
-Expected: fails with ENOENT for `src/extension/...` — confirms the script runs and the asset/target config is wired correctly.
+Expected: fails with ENOENT for `src/extension/...` - confirms the script runs and the asset/target config is wired correctly.
 
 - [ ] **Step 6: Commit**
 
@@ -442,7 +442,7 @@ git commit -m "move source files to src/ and update test paths"
 
 ```js
 /**
- * Trigger — Shared Constants
+ * Trigger - Shared Constants
  * Single source of truth for thresholds, timing values, and limits.
  */
 
@@ -500,7 +500,7 @@ Extract from `src/extension/background/service-worker.js` lines ~279-319:
 
 ```js
 /**
- * Trigger — Workflow Schema Utilities
+ * Trigger - Workflow Schema Utilities
  * Validation, failure classification, and step type helpers.
  */
 
@@ -574,7 +574,7 @@ git commit -m "add shared workflow-schema module"
 
 ```js
 /**
- * Trigger — Runtime Configuration
+ * Trigger - Runtime Configuration
  * Environment-aware getters for backend URL and other config.
  */
 
@@ -645,7 +645,7 @@ Extract the pure logic from `src/extension/content/fingerprint.js`, converting f
 
 ```js
 /**
- * Trigger — Element Fingerprinting Engine (Shared)
+ * Trigger - Element Fingerprinting Engine (Shared)
  *
  * Generates multi-signal fingerprints for DOM elements during recording,
  * and resolves those fingerprints back to elements during replay.
@@ -931,7 +931,7 @@ Replace the entire content with:
 
 ```js
 /**
- * Trigger — Element Fingerprinting (Content Script Bridge)
+ * Trigger - Element Fingerprinting (Content Script Bridge)
  * Imports shared fingerprint engine and exposes on window.Trigger.
  */
 
@@ -1072,7 +1072,7 @@ Extract storage-related code from service-worker.js:
 
 ```js
 /**
- * Trigger — Storage Abstraction
+ * Trigger - Storage Abstraction
  * Session storage with fallback, workflow CRUD, state persistence.
  */
 
@@ -1266,7 +1266,7 @@ git commit -m "extract storage module from service worker"
 
 ```js
 /**
- * Trigger — Upload Retry Queue
+ * Trigger - Upload Retry Queue
  * Exponential backoff queue for backend upload failures.
  */
 
@@ -1455,7 +1455,7 @@ git commit -m "extract upload-queue module from service worker"
 
 ```js
 /**
- * Trigger — Recording Handlers
+ * Trigger - Recording Handlers
  * START_RECORDING, STOP_RECORDING, RECORD_STEP message handlers.
  */
 
@@ -1617,7 +1617,7 @@ This is the largest extraction. It contains the replay state machine, credential
 
 ```js
 /**
- * Trigger — Replay State Machine
+ * Trigger - Replay State Machine
  * Manages replay orchestration, recovery, credentials, and freshness.
  */
 
@@ -2251,8 +2251,8 @@ Load `dist/extension/` as an unpacked extension in Chrome. Confirm:
 1. Extension icon appears
 2. Popup opens and shows "Ready"
 3. Record a simple click workflow on any page
-4. Stop recording — workflow appears in popup list
-5. Replay the workflow — ghost cursor moves, steps execute
+4. Stop recording - workflow appears in popup list
+5. Replay the workflow - ghost cursor moves, steps execute
 6. Share button works (copies link or shows notice)
 
 - [ ] **Step 4: Verify no file in `src/` exceeds 300 lines**

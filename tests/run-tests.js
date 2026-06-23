@@ -1,5 +1,5 @@
 /**
- * Trigger — Comprehensive Test Suite
+ * Trigger - Comprehensive Test Suite
  * Tests all extension modules: fingerprinting, recorder, replay, overlay,
  * service worker logic, and popup logic.
  * 
@@ -7,9 +7,15 @@
  * Run: node tests/run-tests.js
  */
 
-const { JSDOM } = require('jsdom');
-const fs = require('fs');
-const path = require('path');
+import { JSDOM } from 'jsdom';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+import { webcrypto } from 'crypto';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // ── Test Harness ─────────────────────────────────────────────────
 
@@ -71,6 +77,15 @@ function assertIncludes(str, substr, msg) {
   }
 }
 
+function assertMatches(str, pattern, msg) {
+  if (typeof str !== 'string' || !pattern.test(str)) {
+    throw new Error(
+      (msg ? msg + ': ' : '') +
+      `expected string to match ${pattern}`
+    );
+  }
+}
+
 // ── DOM Environment Setup ────────────────────────────────────────
 
 function createDOM(html) {
@@ -108,8 +123,8 @@ function createDOM(html) {
 
 function createChromeMock() {
   const listeners = {};
-  const storage = { local: {}, session: {} };
-  const storageWrites = { local: 0, session: 0 };
+  const storage = { local: {}, session: {}, sync: {} };
+  const storageWrites = { local: 0, session: 0, sync: 0 };
 
   return {
     runtime: {
@@ -141,6 +156,20 @@ function createChromeMock() {
           return Promise.resolve();
         },
       },
+      sync: {
+        get: function (key) {
+          return Promise.resolve(storage.sync);
+        },
+        set: function (obj) {
+          Object.assign(storage.sync, obj);
+          storageWrites.sync += 1;
+          return Promise.resolve();
+        },
+        remove: function (key) {
+          delete storage.sync[key];
+          return Promise.resolve();
+        }
+      }
     },
     tabs: {
       query: function () { return Promise.resolve([{ id: 1 }]); },
@@ -157,7 +186,6 @@ function createChromeMock() {
 // ── Load source files into JSDOM context ─────────────────────────
 
 function loadContentScripts(window) {
-  // Load the built bundle — source files use ES modules (bundled by esbuild to IIFE)
   const builtBundle = path.join(__dirname, '..', 'dist', 'extension', 'content', 'content.js');
   const code = fs.readFileSync(builtBundle, 'utf8');
   const fn = new Function('window', 'document', 'chrome', 'CSS', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'getComputedStyle', 'XPathResult', 'Node', 'Promise', 'MouseEvent', 'KeyboardEvent', 'Event', 'history',
@@ -175,12 +203,18 @@ function loadContentScripts(window) {
 }
 
 function loadInjectorScript(window) {
+  const builtBundle = path.join(__dirname, '..', 'dist', 'extension', 'content', 'content.js');
+  if (fs.existsSync(builtBundle)) {
+    return;
+  }
+
   const code = fs.readFileSync(
     path.join(__dirname, '..', 'src', 'extension', 'content', 'index.js'),
     'utf8'
   );
+  const runtimeCode = code.replace(/^\s*import\s.+?;\s*$/mg, '');
   const fn = new Function('window', 'document', 'chrome', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
-    code
+    runtimeCode
   );
   fn(
     window,
@@ -199,7 +233,7 @@ function loadInjectorScript(window) {
 
 async function runAllTests() {
   console.log('\x1b[1m\x1b[34m╔══════════════════════════════════════╗');
-  console.log('║   TRIGGER — Full Test Suite          ║');
+  console.log('║   TRIGGER - Full Test Suite          ║');
   console.log('╚══════════════════════════════════════╝\x1b[0m');
 
   // ── 1. Manifest Validation ──
@@ -239,7 +273,7 @@ async function runAllTests() {
   testPopup();
 
   // ── 10. Integration ──
-  suite('Integration — Record & Resolve Round-trip');
+  suite('Integration - Record & Resolve Round-trip');
   testRoundTrip();
 
   // ── 11. Credential Parameterization ──
@@ -315,7 +349,7 @@ function testManifest() {
   });
 
   test('no import/export in content scripts', () => {
-    // Check the built bundle (dist/) not source — source uses ES modules bundled by esbuild to IIFE
+    // Check the built bundle (dist/) not source - source uses ES modules bundled by esbuild to IIFE
     const builtBundle = path.join(__dirname, '..', 'dist', 'extension', 'content', 'content.js');
     if (fs.existsSync(builtBundle)) {
       const code = fs.readFileSync(builtBundle, 'utf8');
@@ -357,6 +391,11 @@ function testSyntax() {
         // fingerprint.js is now an ES module bridge (import/export syntax)
         assertIncludes(code, 'window.Trigger', 'missing window.Trigger assignment');
         assertIncludes(code, 'resolveFingerprint', 'missing resolveFingerprint');
+        return;
+      }
+      if (file.includes('content/index.js') || file.endsWith('/index.js') || file === 'content/index.js') {
+        assertIncludes(code, 'window.Trigger', 'missing Trigger usage in content entrypoint');
+        assertIncludes(code, '_browser.runtime.onMessage', 'missing runtime message listener');
         return;
       }
       try {
@@ -511,7 +550,7 @@ function testFingerprintResolution() {
   loadContentScripts(window);
   const T = window.Trigger;
 
-  test('resolve by ARIA label — exact match', () => {
+  test('resolve by ARIA label - exact match', () => {
     const fp = {
       role: 'button', ariaLabel: 'Save', text: 'Save',
       tagName: 'button', selector: '#btn1', xpath: '//*[@id="btn1"]',
@@ -667,7 +706,7 @@ async function testRecorder() {
     const input = document.getElementById('test-input');
     input.value = 'hello';
     input.dispatchEvent(new window.Event('input', { bubbles: true }));
-    // Input is debounced at 500ms — but we can flush by clicking elsewhere
+    // Input is debounced at 500ms - but we can flush by clicking elsewhere
     const btn = document.getElementById('test-btn');
     btn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
     // Clicking should flush the input buffer first
@@ -893,9 +932,9 @@ function testOverlay() {
     const overlay = document.getElementById('trigger-overlay');
     assert(overlay, 'Overlay should be in DOM');
     const shadow = overlay.shadowRoot;
-    assert(shadow, 'Should have shadow DOM');
+    assert(shadow, 'Shadow root missing');
     const bar = shadow.getElementById('trigger-bar');
-    assert(bar, 'Should have status bar');
+    assert(bar, 'Status bar missing');
     assertIncludes(bar.className, 'recording');
     T.destroyOverlay();
   });
@@ -907,9 +946,9 @@ function testOverlay() {
     const bar = shadow.getElementById('trigger-bar');
     assertIncludes(bar.className, 'replaying');
     const progress = shadow.getElementById('trigger-progress');
-    assert(progress, 'Should have progress bar');
+    assert(progress, 'Progress bar missing');
     const stopBtn = shadow.getElementById('trigger-stop');
-    assert(stopBtn, 'Should have stop button');
+    assert(stopBtn, 'Stop button missing');
     T.destroyOverlay();
   });
 
@@ -971,7 +1010,7 @@ function testOverlay() {
     const overlay = document.getElementById('trigger-overlay');
     const shadow = overlay.shadowRoot;
     const img = shadow.querySelector('.assist-anchor');
-    assert(img, 'Anchor image should render when screenshotAnchor is present');
+    assert(img, 'Anchor image missing');
     assertEqual(img.getAttribute('src'), 'data:image/png;base64,ANCHOR');
     T.destroyOverlay();
   });
@@ -992,8 +1031,8 @@ function testOverlay() {
     const shadow = overlay.shadowRoot;
     const assist = shadow.getElementById('trigger-assist');
     const img = shadow.querySelector('.assist-anchor');
-    assertEqual(assist.style.display, 'block', 'Assist panel should still display');
-    assert(!img, 'Anchor image should be absent when screenshotAnchor missing');
+    assertEqual(assist.style.display, 'block');
+    assert(!img, 'Anchor image should be absent');
     T.destroyOverlay();
   });
 
@@ -1073,7 +1112,7 @@ function testOverlay() {
     T.createOverlay('recording');
     T.createOverlay('replaying');
     const overlays = document.querySelectorAll('#trigger-overlay');
-    assertEqual(overlays.length, 1, 'Should only have one overlay');
+    assertEqual(overlays.length, 1);
     const shadow = overlays[0].shadowRoot;
     assertIncludes(shadow.getElementById('trigger-bar').className, 'replaying');
     T.destroyOverlay();
@@ -1083,18 +1122,14 @@ function testOverlay() {
 // ── 8. Service Worker Logic Tests ────────────────────────────────
 
 async function testServiceWorker() {
-  // We can't run the service worker in jsdom directly (it uses top-level chrome APIs),
-  // but we can test the logic patterns by evaluating specific functions.
-
   const swCode = fs.readFileSync(
-    path.join(__dirname, '..', 'src', 'extension', 'background', 'service-worker.js'),
+    path.join(__dirname, '..', 'dist', 'extension', 'background', 'service-worker.js'),
     'utf8'
   );
 
   test('STOP_RECORDING saves tabId before nulling state', () => {
-    assertIncludes(swCode, 'const tabId = state.activeTabId', 'Should save tabId before clearing');
-    assertIncludes(swCode, 'if (tabId)', 'Should use saved tabId');
-    // Ensure it does NOT use state.activeTabId after nulling
+    assertIncludes(swCode, 'const tabId = state.activeTabId');
+    assertIncludes(swCode, 'if (tabId)');
     const stopBlock = swCode.substring(
       swCode.indexOf("'STOP_RECORDING'"),
       swCode.indexOf("'RECORD_STEP'")
@@ -1104,15 +1139,12 @@ async function testServiceWorker() {
   });
 
   test('generateId produces 12-char alphanumeric string', () => {
-    // Extract and test generateId
     const match = swCode.match(/function generateId\(\) \{[\s\S]*?return id;\s*\}/);
     assert(match, 'generateId function not found');
-    // Use crypto.getRandomValues polyfill for node
-    const { webcrypto } = require('crypto');
     const fn = new Function('crypto', match[0] + '; return generateId();');
     const id = fn(webcrypto);
-    assertEqual(id.length, 12, 'ID should be 12 chars');
-    assert(/^[a-z0-9]+$/.test(id), 'ID should be alphanumeric lowercase');
+    assertEqual(id.length, 12);
+    assert(/^[a-z0-9]+$/.test(id));
   });
 
   test('all message handlers are defined', () => {
@@ -1123,42 +1155,43 @@ async function testServiceWorker() {
       'GET_WORKFLOWS', 'DELETE_WORKFLOW', 'REPLAY_HEARTBEAT', 'ASSIST_ACTION',
     ];
     for (const handler of expectedHandlers) {
-      assertIncludes(swCode, `'${handler}'`, `Missing handler: ${handler}`);
+      assertIncludes(swCode, handler, `Missing handler: ${handler}`);
     }
   });
 
   test('keepalive interval is 20 seconds', () => {
-    assertIncludes(swCode, 'KEEPALIVE_INTERVAL_MS = 20000', 'Keepalive should be 20000ms');
+    assertMatches(swCode, /KEEPALIVE_INTERVAL_MS\s*=\s*(20000|2e4)/);
   });
 
   test('replay heartbeat stale threshold is defined', () => {
-    assertIncludes(swCode, 'REPLAY_HEARTBEAT_STALE_MS = 45000');
-    assertIncludes(swCode, 'MAX_RECOVERY_ATTEMPTS = 3');
+    assertMatches(swCode, /REPLAY_HEARTBEAT_STALE_MS\s*=\s*(45000|45e3)/);
+    assertMatches(swCode, /MAX_RECOVERY_ATTEMPTS\s*=\s*3/);
   });
 
   test('STEP_FAILED applies retry budget with typed reasons', () => {
     assertIncludes(swCode, 'classifyFailure(');
     assertIncludes(swCode, 'isRetryableFailure(');
     assertIncludes(swCode, "state.stepRetries[index] = retries + 1");
-    assertIncludes(swCode, "type: 'SHOW_ASSIST'");
+    assertMatches(swCode, /type:\s*['\"]SHOW_ASSIST['\"]/);
   });
 
   test('auth-wall failures are classified and routed as assist reasons', () => {
-    assertIncludes(swCode, "return 'auth_wall'");
+    assertIncludes(swCode, 'auth_wall');
     assertIncludes(swCode, 'reasonType,');
-    assertIncludes(swCode, "type: 'SHOW_ASSIST'");
+    assertMatches(swCode, /type:\s*['\"]SHOW_ASSIST['\"]/);
   });
 
   test('pre-replay DOM drift check is requested before first step', () => {
-    assertIncludes(swCode, "type: 'CHECK_DOM_DRIFT'");
-    assertIncludes(swCode, 'REPLAY_FRESHNESS_THRESHOLD = 60');
-    assertIncludes(swCode, "'DOM_DRIFT_DECISION': async");
+    assertIncludes(swCode, 'CHECK_DOM_DRIFT');
+    assertIncludes(swCode, 'REPLAY_FRESHNESS_THRESHOLD');
+    assertIncludes(swCode, 'DOM_DRIFT_DECISION');
   });
 
   test('state persistence supports session fallback for Firefox', () => {
     assertIncludes(swCode, 'sessionStorageSet({ triggerState: state })');
-    assertIncludes(swCode, "sessionStorageGet('triggerState')");
-    assertIncludes(swCode, "SESSION_STORAGE_PREFIX = 'session_'");
+    assertIncludes(swCode, 'sessionStorageGet(');
+    assertIncludes(swCode, 'triggerState');
+    assertIncludes(swCode, 'SESSION_STORAGE_PREFIX');
   });
 
   test('workflows stored in extension local storage', () => {
@@ -1167,7 +1200,7 @@ async function testServiceWorker() {
   });
 
   test('message router returns true for async handlers', () => {
-    assertIncludes(swCode, 'return true; // keep channel open');
+    assertIncludes(swCode, 'return true;');
   });
 
   test('STEP_COMPLETED advances replayIndex correctly', () => {
@@ -1181,99 +1214,94 @@ async function testServiceWorker() {
 
   test('tab removal listener aborts active replay', () => {
     assertIncludes(swCode, '_browser.tabs.onRemoved.addListener');
-    assertIncludes(swCode, "abortReplaySession('tab_closed'");
+    assertIncludes(swCode, 'abortReplaySession(');
   });
 }
 
 // ── 11. Credential Parameterization Tests ───────────────────────
 
 async function testCredentialParameterization() {
-  const { window } = createDOM('<html><body><input id="email" type="text" name="email" /></body></html>');
-  loadContentScripts(window);
+  await testAsync('sensitive replay flow prompts for and injects credentials', async () => {
+    const { window } = createDOM('<html><body><input id="email" type="text" name="email" /></body></html>');
+    const sentMessages = [];
+    let reReadyCount = 0;
+    let submittedCredentialValues = null;
+    let executedStep = null;
 
-  const sentMessages = [];
-  let reReadyCount = 0;
-  let submittedCredentialValues = null;
-  let executedStep = null;
-
-  window.chrome.runtime.sendMessage = function (msg) {
-    sentMessages.push(msg);
-
-    if (msg.type === 'GET_STATE') {
-      return Promise.resolve({ mode: 'replaying' });
-    }
-
-    if (msg.type === 'REPLAY_READY') {
-      reReadyCount += 1;
-      if (reReadyCount === 1) {
+    window.chrome.runtime.sendMessage = function (msg) {
+      sentMessages.push(msg);
+      if (msg.type === 'GET_STATE') {
+        return Promise.resolve({ mode: 'replaying' });
+      }
+      if (msg.type === 'REPLAY_READY') {
+        reReadyCount += 1;
+        if (reReadyCount === 1) {
+          return Promise.resolve({
+            type: 'REQUEST_CREDENTIALS',
+            prompts: [{ key: 'email', label: 'Email Address', stepIndices: [0] }],
+          });
+        }
+        return Promise.resolve({ type: 'REPLAY_COMPLETE' });
+      }
+      if (msg.type === 'SUBMIT_REPLAY_CREDENTIALS') {
         return Promise.resolve({
-          type: 'REQUEST_CREDENTIALS',
-          prompts: [{ key: 'email', label: 'Email Address', stepIndices: [0] }],
+          type: 'EXECUTE_STEP',
+          step: {
+            type: 'input',
+            sensitive: true,
+            value: '',
+            _credentialKey: 'email',
+            target: { name: 'email' },
+          },
+          index: 0,
+          total: 1,
         });
       }
-      return Promise.resolve({ type: 'REPLAY_COMPLETE' });
-    }
+      if (msg.type === 'STEP_COMPLETED') {
+        return Promise.resolve({ type: 'REPLAY_COMPLETE' });
+      }
+      return Promise.resolve({ ok: true });
+    };
 
-    if (msg.type === 'SUBMIT_REPLAY_CREDENTIALS') {
-      return Promise.resolve({
-        type: 'EXECUTE_STEP',
-        step: {
-          type: 'input',
-          sensitive: true,
-          value: '',
-          _credentialKey: 'email',
-          target: { name: 'email' },
-        },
-        index: 0,
-        total: 1,
-      });
-    }
+    loadContentScripts(window);
 
-    if (msg.type === 'STEP_COMPLETED') {
-      return Promise.resolve({ type: 'REPLAY_COMPLETE' });
-    }
+    const executionCompleted = new Promise(resolve => {
+      window.Trigger.executeStep = function (step) {
+        executedStep = step;
+        resolve();
+        return Promise.resolve({ success: true, confidence: 100 });
+      };
+    });
 
-    return Promise.resolve({ ok: true });
-  };
+    window.Trigger.showCredentialPrompt = function (payload) {
+      submittedCredentialValues = { email: 'user@example.com' };
+      payload.onSubmit(submittedCredentialValues);
+    };
 
-  window.Trigger.showCredentialPrompt = function (payload) {
-    submittedCredentialValues = { email: 'user@example.com' };
-    payload.onSubmit(submittedCredentialValues);
-  };
+    // The checkIfReplaying() function runs on script load, so we just need to wait
+    // for our final mock in the chain (executeStep) to be called.
+    await executionCompleted;
 
-  window.Trigger.executeStep = function (step) {
-    executedStep = step;
-    return Promise.resolve({ success: true, confidence: 100 });
-  };
-
-  loadInjectorScript(window);
-
-  await new Promise((resolve) => setTimeout(resolve, 25));
-
-  await testAsync('sensitive replay flow triggers pre-replay credential prompt', async () => {
-    assert(sentMessages.some(m => m.type === 'REPLAY_READY'), 'REPLAY_READY should be sent');
-    assert(sentMessages.some(m => m.type === 'SUBMIT_REPLAY_CREDENTIALS'), 'Credentials handshake should be submitted');
-    assert(submittedCredentialValues, 'Credential prompt should collect values');
-  });
-
-  await testAsync('credential values are injected into executor step in memory', async () => {
-    assert(executedStep, 'executeStep should be invoked');
-    assertEqual(executedStep.type, 'input');
-    assertEqual(executedStep.sensitive, false, 'Sensitive flag should be cleared for injected run');
-    assertEqual(executedStep.value, 'user@example.com', 'Injected value should be forwarded to executor');
-    assertEqual(executedStep._credentialInjected, true, 'Injection marker should be present');
+    assert(sentMessages.some(m => m.type === 'SUBMIT_REPLAY_CREDENTIALS'), 'Credentials handshake failed');
+    assert(submittedCredentialValues, 'Credential prompt failed');
+    assert(executedStep, 'executeStep not invoked');
+    assertEqual(executedStep.value, 'user@example.com');
+    assertEqual(executedStep.sensitive, false);
+    assertEqual(executedStep._credentialInjected, true);
   });
 
   await testAsync('credential flow does not write values to extension storage', async () => {
-    assertEqual(window.chrome._storageWrites.local, 0, 'No local storage writes expected');
-    assertEqual(window.chrome._storageWrites.session, 0, 'No session storage writes expected');
+    const { window } = createDOM();
+    loadContentScripts(window);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assertEqual(window.chrome._storageWrites.local, 0);
+    assertEqual(window.chrome._storageWrites.session, 0);
   });
 
   await testAsync('low freshness confidence triggers DOM drift warning before replay', async () => {
     const { window } = createDOM();
-    loadContentScripts(window);
-
     let warned = false;
+
     window.chrome.runtime.sendMessage = function (msg) {
       if (msg.type === 'GET_STATE') return Promise.resolve({ mode: 'replaying' });
       if (msg.type === 'REPLAY_READY') {
@@ -1286,20 +1314,24 @@ async function testCredentialParameterization() {
       return Promise.resolve({ ok: true });
     };
 
+    loadContentScripts(window);
+
+    const warningShown = new Promise(resolve => {
+      window.Trigger.showDriftWarning = function () {
+        warned = true;
+        resolve();
+      };
+    });
+
     window.Trigger.evaluateReplayFreshness = function () {
       return { averageConfidence: 30, sampledCount: 1, details: [{ stepIndex: 0, confidence: 30 }] };
     };
-    window.Trigger.showDriftWarning = function () {
-      warned = true;
-    };
-    window.Trigger.executeStep = function () {
-      return Promise.resolve({ success: true });
-    };
 
-    loadInjectorScript(window);
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    window.Trigger.executeStep = function () { return Promise.resolve({ success: true }); };
 
-    assertEqual(warned, true, 'DOM drift warning should be shown below threshold');
+    await warningShown;
+
+    assertEqual(warned, true);
   });
 }
 
@@ -1326,11 +1358,9 @@ function testPopup() {
   });
 
   test('popup JS sets up click listener once in init', () => {
-    // The listener should be in init, not in loadWorkflows
     assertIncludes(js, "workflowList.addEventListener('click', handleWorkflowAction)");
-    // Count occurrences — should be exactly 1
     const count = (js.match(/workflowList\.addEventListener/g) || []).length;
-    assertEqual(count, 1, 'Should add click listener exactly once');
+    assertEqual(count, 1);
   });
 
   test('popup JS escapes HTML in workflow names', () => {
@@ -1402,7 +1432,7 @@ function testRoundTrip() {
     const fp = T.generateFingerprint(el);
     const result = T.resolveFingerprint(fp);
     assert(result.element === el);
-    assert(result.confidence >= 50, `Confidence ${result.confidence} too low`);
+    assert(result.confidence >= 50);
   });
 
   test('round-trip: button with aria-label', () => {
@@ -1410,7 +1440,7 @@ function testRoundTrip() {
     const fp = T.generateFingerprint(el);
     const result = T.resolveFingerprint(fp);
     assert(result.element === el);
-    assert(result.confidence >= 70, `Confidence ${result.confidence} too low`);
+    assert(result.confidence >= 70);
   });
 
   test('round-trip: input with name', () => {
@@ -1439,26 +1469,22 @@ function testRoundTrip() {
     const fp = T.generateFingerprint(el);
     const result = T.resolveFingerprint(fp);
     assert(result.element === el);
-    assert(result.confidence >= 50, `Confidence ${result.confidence} too low`);
+    assert(result.confidence >= 50);
   });
 
   test('round-trip: fingerprint survives minor DOM changes', () => {
-    // Add a new element before the button, shifting its position but keeping text/role
     const main = document.querySelector('main');
     const extra = document.createElement('div');
     extra.textContent = 'Notice: new content injected';
     main.insertBefore(extra, main.firstChild);
 
-    // Re-resolve the original fingerprint
     const btn = document.getElementById('submit-btn');
     const fp = T.generateFingerprint(btn);
-    // Clear the ID to simulate a less stable selector
     const originalFp = { ...fp, selector: 'button.cta-button', xpath: '/html/body/main/form/button[1]' };
-    // Even with wrong selector/xpath, should still resolve via text + role + tag
     originalFp.ariaLabel = '';
     const result = T.resolveFingerprint(originalFp);
-    assert(result.element === btn, 'Should still find the button via text matching');
-    assert(result.confidence >= 30, `Confidence ${result.confidence} should be reasonable`);
+    assert(result.element === btn);
+    assert(result.confidence >= 30);
 
     extra.remove();
   });

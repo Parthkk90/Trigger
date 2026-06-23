@@ -1,14 +1,27 @@
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-const { webcrypto } = require('node:crypto');
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import vm from 'node:vm';
+import { webcrypto } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
 
-const swCode = fs.readFileSync(
-  path.join(__dirname, '..', 'extension', 'background', 'service-worker.js'),
-  'utf8'
-);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+function loadServiceWorkerCode() {
+  const builtPath = path.join(__dirname, '..', 'dist', 'extension', 'background', 'service-worker.js');
+  const code = fs.readFileSync(builtPath, 'utf8');
+
+  // esbuild may emit an ESM export footer for the bundled entrypoint.
+  // Strip it so we can execute in a classic VM context for tests.
+  return code
+    .replace(/^\s*export\s+default\s+require_service_worker\(\);?\s*$/m, 'require_service_worker();')
+    .replace(/^\s*export\s+default\s+[^;]+;?\s*$/m, '');
+}
+
+const swCode = loadServiceWorkerCode();
 
 function createStorageArea(target) {
   return {

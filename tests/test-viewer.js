@@ -1,11 +1,16 @@
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const { JSDOM } = require('jsdom');
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { JSDOM } from 'jsdom';
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const viewerScript = fs.readFileSync(
-  path.join(__dirname, '..', 'viewer', 'viewer.js'),
+  path.join(__dirname, '..', 'src', 'viewer', 'viewer.js'),
   'utf8'
 );
 
@@ -126,16 +131,11 @@ test('executeWorkflowInline sends replay message when extension is detected', as
   const calls = [];
   const chromeMock = {
     runtime: {
-      sendMessage: (msg, callback) => {
+      sendMessage: (msg) => {
         calls.push(msg.type);
 
-        if (typeof callback === 'function') {
-          if (msg.type === 'EXTENSION_PING') {
-            callback({ ok: true });
-          } else {
-            callback({});
-          }
-          return;
+        if (msg.type === 'EXTENSION_PING') {
+          return Promise.resolve({ ok: true });
         }
 
         if (msg.type === 'START_REPLAY_INLINE') {
