@@ -1,5 +1,5 @@
 /**
- * Trigger — Runtime Configuration
+ * Trigger - Runtime Configuration
  * Environment-aware getters for backend URL and other config.
  */
 

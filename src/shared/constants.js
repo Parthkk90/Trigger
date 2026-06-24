@@ -1,5 +1,5 @@
 /**
- * Trigger — Shared Constants
+ * Trigger - Shared Constants
  * Single source of truth for thresholds, timing values, and limits.
  */
 
