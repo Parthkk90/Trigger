@@ -1,5 +1,5 @@
 /**
- * Trigger — Workflow Schema Utilities
+ * Trigger - Workflow Schema Utilities
  * Validation, failure classification, and step type helpers.
  */
 

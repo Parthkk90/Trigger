@@ -1,5 +1,5 @@
 /**
- * Trigger — Element Fingerprinting Engine (Shared)
+ * Trigger - Element Fingerprinting Engine (Shared)
  *
  * Generates multi-signal fingerprints for DOM elements during recording,
  * and resolves those fingerprints back to elements during replay.
@@ -196,8 +196,23 @@ export function getVisibleText(element) {
   if (tag === 'select' && element.selectedIndex >= 0) {
     return element.options[element.selectedIndex].text || '';
   }
-  var text = element.innerText || element.textContent || '';
-  var trimmed = text.trim();
+
+  // innerText is layout-aware and usually the best signal for light DOM.
+  // It does NOT read shadow DOM content of the element host itself.
+  var text = element.innerText || '';
+
+  // If innerText is empty, it might be because the text is in a shadow DOM.
+  // Fallback to textContent, which DOES read shadow DOM content (though it's not layout-aware).
+  if (!text.trim()) {
+    text = element.textContent || '';
+  }
+
+  // Final fallback: check for aria-label which is often used for icon-only buttons
+  if (!text.trim()) {
+    text = element.getAttribute('aria-label') || '';
+  }
+
+  var trimmed = text.replace(/\s+/g, ' ').trim();
   return trimmed.length > 100 ? trimmed.slice(0, 100) : trimmed;
 }
 
@@ -252,7 +267,12 @@ function buildUniqueSelector(element) {
     }
 
     parts.unshift(sel);
-    current = current.parentElement;
+    var next = current.parentElement;
+    if (!next && typeof current.getRootNode === 'function') {
+      var root = current.getRootNode();
+      if (root !== current && root.host) next = root.host;
+    }
+    current = next;
     depth++;
   }
 
@@ -277,7 +297,12 @@ function getXPath(element) {
       sib = sib.previousElementSibling;
     }
     parts.unshift(current.tagName.toLowerCase() + '[' + idx + ']');
-    current = current.parentElement;
+    var next = current.parentElement;
+    if (!next && typeof current.getRootNode === 'function') {
+      var root = current.getRootNode();
+      if (root !== current && root.host) next = root.host;
+    }
+    current = next;
   }
   return '/' + parts.join('/');
 }
