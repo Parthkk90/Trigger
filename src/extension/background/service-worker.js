@@ -4,6 +4,8 @@
  * Implements keepalive to survive MV3 service worker termination.
  */
 
+import { getBackendUrl, sanitizeUrl } from '../../shared/config.js';
+
 const _browser = typeof browser !== 'undefined' ? browser : chrome;
 const SESSION_STORAGE_PREFIX = 'session_';
 const HAS_NATIVE_SESSION_STORAGE = !!(
@@ -56,6 +58,16 @@ let state = {
   mode: 'idle',        // 'idle' | 'recording' | 'replaying'
   activeTabId: null,
   workflowId: null,
+  // Multi-tab recording: every tab the user acted in during this session.
+  // Keyed by tab id -> { tabId, slot, url, title, openedAt, openerTabId }
+  recordedTabs: {},
+  closedTabs: {},
+  nextTabSlot: 0,
+  // Slot of the tab that produced the previous recorded step, used to emit
+  // tab_switch steps when the user moves between tabs mid-workflow.
+  lastStepTabSlot: null,
+  // Replay-side mapping of workflow tab slot -> live browser tab id.
+  replayTabs: {},
   steps: [],
   replayIndex: 0,
   credentialPrompts: [],
@@ -74,6 +86,7 @@ const KEEPALIVE_INTERVAL_MS = 20000;
 const REPLAY_HEARTBEAT_STALE_MS = 45000;
 const MAX_RECOVERY_ATTEMPTS = 3;
 const REPLAY_FRESHNESS_THRESHOLD = 60;
+const TAB_CONTROL_GUARD_LIMIT = 50;
 const UPLOAD_QUEUE_KEY = 'uploadRetryQueue';
 const UPLOAD_MAX_RETRIES = 5;
 const UPLOAD_INITIAL_BACKOFF_MS = 2000;
@@ -239,6 +252,14 @@ async function restoreState() {
     state = {
       ...state,
       ...result.triggerState,
+      recordedTabs: result.triggerState.recordedTabs || {},
+      closedTabs: result.triggerState.closedTabs || {},
+      nextTabSlot: result.triggerState.nextTabSlot || 0,
+      lastStepTabSlot:
+        typeof result.triggerState.lastStepTabSlot === 'number'
+          ? result.triggerState.lastStepTabSlot
+          : null,
+      replayTabs: result.triggerState.replayTabs || {},
       credentialPrompts: result.triggerState.credentialPrompts || [],
       sensitiveStepKeys: result.triggerState.sensitiveStepKeys || {},
       credentialsReady: result.triggerState.credentialsReady !== false,
@@ -281,11 +302,22 @@ function validateReplayWorkflow(workflow) {
   return { valid: true };
 }
 
-function buildReplayFreshnessSample(steps) {
+// Samples steps to gauge how far the page has drifted since recording.
+// The check runs against one page, so it must only sample steps recorded in
+// that tab - scoring another tab's elements here reports drift that is really
+// just the wrong page, and blocks replay behind a warning that makes no sense.
+function buildReplayFreshnessSample(steps, tabSlot) {
   const sample = [];
   for (let i = 0; i < steps.length && sample.length < 3; i += 1) {
     const step = steps[i];
     if (!step || !step.target) continue;
+    if (
+      typeof tabSlot === 'number' &&
+      typeof step.tabSlot === 'number' &&
+      step.tabSlot !== tabSlot
+    ) {
+      continue;
+    }
     sample.push({ ...step, index: typeof step.index === 'number' ? step.index : i });
   }
   return sample;
@@ -477,6 +509,133 @@ function getReplayResponseForCurrentIndex() {
   };
 }
 
+// Resolves the live tab for a workflow tab slot, creating it if the
+// workflow opened a tab at this point in the recording.
+// Compares two URLs by origin and path, ignoring query and hash, which
+// commonly differ between recording and replay without meaning a different page.
+function isSameTargetUrl(a, b) {
+  try {
+    const left = new URL(a);
+    const right = new URL(b);
+    return left.origin === right.origin && left.pathname === right.pathname;
+  } catch (err) {
+    return a === b;
+  }
+}
+
+// Finds a tab already sitting at the target URL that no slot has claimed yet.
+async function findAdoptableTab(targetUrl) {
+  if (!targetUrl || targetUrl === 'about:blank') return null;
+
+  let tabs = [];
+  try {
+    tabs = await _browser.tabs.query({});
+  } catch (err) {
+    return null;
+  }
+
+  const claimed = new Set(Object.values(state.replayTabs || {}));
+  return (
+    tabs.find((tab) => tab && !claimed.has(tab.id) && isSameTargetUrl(tab.url, targetUrl)) || null
+  );
+}
+
+async function ensureReplayTabForSlot(slot, url) {
+  if (typeof slot !== 'number') {
+    return { tabId: state.activeTabId, created: false };
+  }
+
+  const existingTabId = state.replayTabs[slot];
+  if (typeof existingTabId === 'number') {
+    try {
+      await _browser.tabs.get(existingTabId);
+      return { tabId: existingTabId, created: false };
+    } catch (err) {
+      // Tab disappeared - fall through and recreate it.
+      delete state.replayTabs[slot];
+    }
+  }
+
+  const manifestEntry = (state.replayTabManifest || []).find((t) => t.slot === slot);
+  const targetUrl = url || (manifestEntry && manifestEntry.url) || 'about:blank';
+
+  // Replaying a click on a target=_blank link makes the page open the tab
+  // itself. Creating another one here would leave an orphan and risk acting
+  // in the wrong tab, so adopt an unclaimed tab already at the target URL.
+  const adopted = await findAdoptableTab(targetUrl);
+  if (adopted) {
+    state.replayTabs[slot] = adopted.id;
+    await persistState();
+    return { tabId: adopted.id, created: false };
+  }
+
+  const tab = await _browser.tabs.create({ url: targetUrl, active: true });
+  state.replayTabs[slot] = tab.id;
+  await persistState();
+  return { tabId: tab.id, created: true };
+}
+
+const TAB_CONTROL_STEP_TYPES = ['tab_switch', 'tab_close'];
+
+// Content scripts can only perform in-page actions. Tab-topology steps are
+// consumed in the background first, so a content script is never handed a
+// step it cannot execute.
+async function resolveNextReplayResponse() {
+  let guard = 0;
+  while (guard < TAB_CONTROL_GUARD_LIMIT) {
+    const step = state.steps[state.replayIndex];
+    if (!step) return { type: 'REPLAY_COMPLETE' };
+    if (!TAB_CONTROL_STEP_TYPES.includes(step.type)) {
+      return getReplayResponseForCurrentIndex();
+    }
+
+    const response = await handleTabControlStep(step, state.replayIndex);
+    if (response) return response;
+    guard += 1;
+  }
+  return getReplayResponseForCurrentIndex();
+}
+
+// Handles the tab-topology step types inline in the background, since they
+// have no in-page action for a content script to perform.
+async function handleTabControlStep(step, index) {
+  if (step.type === 'tab_switch') {
+    const { tabId, created } = await ensureReplayTabForSlot(step.tabSlot, step.url);
+    state.activeTabId = tabId;
+    // The switch itself is the step; consume it so the focused tab runs
+    // the next real action rather than looping on this one.
+    state.replayIndex = index + 1;
+    state.lastReplayProgressAt = Date.now();
+    state.lastReplayHeartbeatAt = Date.now();
+    await persistState();
+    await _browser.tabs.update(tabId, { active: true });
+
+    if (created) {
+      // A freshly created tab will load and announce itself via REPLAY_READY.
+      return { type: 'WAITING_TAB_SWITCH', tabSlot: step.tabSlot, tabId, created: true };
+    }
+
+    // Returning to an existing tab fires no page load, so drive it directly.
+    const next = getReplayResponseForCurrentIndex();
+    _browser.tabs.sendMessage(tabId, next).catch((err) => {
+      console.warn('[Trigger] Failed to resume replay in switched tab:', err.message);
+    });
+    return { type: 'WAITING_TAB_SWITCH', tabSlot: step.tabSlot, tabId, created: false };
+  }
+
+  if (step.type === 'tab_close') {
+    const tabId = state.replayTabs[step.tabSlot];
+    if (typeof tabId === 'number') {
+      await _browser.tabs.remove(tabId).catch(() => {});
+      delete state.replayTabs[step.tabSlot];
+      if (state.activeTabId === tabId) state.activeTabId = null;
+    }
+    return await getReplayResponseForCompletedIndex(index);
+  }
+
+  return null;
+}
+
 async function getReplayResponseForCompletedIndex(index) {
   state.replayIndex = index + 1;
   state.lastReplayProgressAt = Date.now();
@@ -495,8 +654,21 @@ async function getReplayResponseForCompletedIndex(index) {
   }
 
   const nextStep = state.steps[state.replayIndex];
+
+  if (nextStep.type === 'tab_switch' || nextStep.type === 'tab_close') {
+    const tabResponse = await handleTabControlStep(nextStep, state.replayIndex);
+    if (tabResponse) return tabResponse;
+  }
+
   if (nextStep.type === 'navigate') {
-    await _browser.tabs.update(state.activeTabId, { url: nextStep.url });
+    // Navigate within the tab the step was recorded in.
+    const targetTabId =
+      typeof nextStep.tabSlot === 'number'
+        ? (await ensureReplayTabForSlot(nextStep.tabSlot, nextStep.url)).tabId
+        : state.activeTabId;
+    state.activeTabId = targetTabId;
+    await persistState();
+    await _browser.tabs.update(targetTabId, { url: nextStep.url });
     return { type: 'WAITING_NAVIGATION' };
   }
 
@@ -507,6 +679,154 @@ async function getReplayResponseForCompletedIndex(index) {
     total: state.steps.length,
   };
 }
+
+// ── Multi-tab recording ────────────────────────────────────────────
+// A workflow spans every tab the user acted in. Each tab is assigned a
+// stable "slot" (0, 1, 2...) at record time; steps carry that slot so
+// replay can rebuild the same tab topology without depending on the
+// browser's volatile tab ids.
+
+function isRecordableUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  return url.startsWith('http://') || url.startsWith('https://');
+}
+
+function getTabSlot(tabId) {
+  const entry = state.recordedTabs[tabId];
+  return entry ? entry.slot : null;
+}
+
+// Registers a tab in the recording session and activates its recorder.
+// Idempotent: re-registering a known tab only refreshes its metadata.
+async function registerRecordingTab(tab, openerTabId) {
+  if (!tab || typeof tab.id !== 'number') return null;
+  if (!isRecordableUrl(tab.url)) return null;
+
+  const existing = state.recordedTabs[tab.id];
+  if (existing) {
+    existing.url = tab.url || existing.url;
+    existing.title = tab.title || existing.title;
+    await persistState();
+    return existing;
+  }
+
+  const entry = {
+    tabId: tab.id,
+    slot: state.nextTabSlot,
+    url: tab.url,
+    title: tab.title || '',
+    openedAt: Date.now(),
+    openerTabId: typeof openerTabId === 'number' ? openerTabId : null,
+    openerSlot: typeof openerTabId === 'number' ? getTabSlot(openerTabId) : null,
+  };
+
+  state.recordedTabs[tab.id] = entry;
+  state.nextTabSlot += 1;
+  await persistState();
+
+  await activateRecorderInTab(tab.id);
+  return entry;
+}
+
+// Content scripts are declared at document_idle, but a tab that was already
+// open before the extension loaded (or a tab that navigated mid-recording)
+// may not have a live listener. Inject on demand, then start the recorder.
+async function activateRecorderInTab(tabId) {
+  try {
+    await _browser.tabs.sendMessage(tabId, { type: 'RECORDER_START' });
+    return true;
+  } catch (err) {
+    // No content script yet - inject the bundle and retry once.
+  }
+
+  try {
+    if (_browser.scripting && _browser.scripting.executeScript) {
+      await _browser.scripting.executeScript({
+        target: { tabId },
+        files: ['content/content.js'],
+      });
+    }
+    await _browser.tabs.sendMessage(tabId, { type: 'RECORDER_START' });
+    return true;
+  } catch (err) {
+    console.warn(`[Trigger] Could not activate recorder on tab ${tabId}:`, err.message);
+    return false;
+  }
+}
+
+async function forgetRecordedTab(tabId) {
+  const entry = state.recordedTabs[tabId];
+  if (!entry) return;
+
+  delete state.recordedTabs[tabId];
+  // The tab is gone from the browser but must stay in the workflow manifest,
+  // because earlier steps still reference its slot.
+  state.closedTabs[entry.slot] = { ...entry, closed: true };
+
+  state.steps.push({
+    index: state.steps.length,
+    timestamp: Date.now(),
+    type: 'tab_close',
+    tabSlot: entry.slot,
+  });
+  await persistState();
+}
+
+async function stopRecorderInAllTabs() {
+  const tabIds = Object.keys(state.recordedTabs).map(Number);
+  await Promise.all(
+    tabIds.map((tabId) =>
+      _browser.tabs.sendMessage(tabId, { type: 'RECORDER_STOP' }).catch(() => {})
+    )
+  );
+}
+
+// The manifest covers every tab the workflow touched, including ones the
+// user closed mid-recording, so no step references a missing slot.
+function buildTabManifest() {
+  const all = [...Object.values(state.recordedTabs), ...Object.values(state.closedTabs)];
+  return all
+    .sort((a, b) => a.slot - b.slot)
+    .map((entry) => ({
+      slot: entry.slot,
+      url: entry.url,
+      title: entry.title,
+      openerSlot: entry.openerSlot,
+      closed: !!entry.closed,
+    }));
+}
+
+// Tab lifecycle listeners. These stay registered for the life of the
+// service worker but no-op unless a recording session is active.
+_browser.tabs.onCreated.addListener((tab) => {
+  if (state.mode !== 'recording') return;
+  // A brand-new tab often has no URL yet; onUpdated will register it.
+  if (isRecordableUrl(tab.url)) {
+    registerRecordingTab(tab, tab.openerTabId).catch((err) => {
+      console.warn('[Trigger] Failed to register created tab:', err.message);
+    });
+  }
+});
+
+_browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (state.mode !== 'recording') return;
+  if (changeInfo.status !== 'complete') return;
+  if (!isRecordableUrl(tab.url)) return;
+
+  const known = state.recordedTabs[tabId];
+  if (!known) {
+    registerRecordingTab(tab, tab.openerTabId).catch((err) => {
+      console.warn('[Trigger] Failed to register updated tab:', err.message);
+    });
+    return;
+  }
+
+  // Known tab navigated - the content script was torn down, restart it.
+  known.url = tab.url;
+  known.title = tab.title || known.title;
+  persistState().catch(() => {});
+  activateRecorderInTab(tabId).catch(() => {});
+});
 
 // Restore persistent state and retry worker on startup.
 async function initializeBackgroundState() {
@@ -540,33 +860,63 @@ const messageHandlers = {
   // ── Recording ──
   'START_RECORDING': async (msg, sender) => {
     state.mode = 'recording';
-    state.activeTabId = sender.tab?.id ?? msg.tabId;
+    // An explicit tabId from the caller wins: the popup already resolved which
+    // tab the user means. sender.tab is only a fallback, and is the popup's own
+    // tab whenever the popup is opened as a page rather than a browser action.
+    state.activeTabId = msg.tabId ?? sender.tab?.id;
     state.steps = [];
+    state.recordedTabs = {};
+    state.closedTabs = {};
+    state.nextTabSlot = 0;
+    state.lastStepTabSlot = null;
     state.workflowId = generateId();
     state.replaySessionStatus = 'idle';
     startKeepalive();
     await persistState();
 
-    // Notify content script to activate recorder
+    let originTab = null;
     try {
-      await _browser.tabs.sendMessage(state.activeTabId, {
-        type: 'RECORDER_START',
-      });
-      console.log(`[Trigger] Recording started on tab ${state.activeTabId}`);
+      originTab = await _browser.tabs.get(state.activeTabId);
     } catch (err) {
-      console.error(`[Trigger] Failed to start recording on tab ${state.activeTabId}:`, err);
+      console.warn('[Trigger] Could not read origin tab:', err.message);
     }
 
-    return { status: 'recording', workflowId: state.workflowId };
+    const registered = originTab ? await registerRecordingTab(originTab, null) : null;
+    if (!registered) {
+      // Fully unwind, or a later STOP_RECORDING would save and upload an
+      // empty workflow built from this aborted session's leftover state.
+      state.mode = 'idle';
+      state.activeTabId = null;
+      state.workflowId = null;
+      state.steps = [];
+      state.recordedTabs = {};
+      state.closedTabs = {};
+      state.nextTabSlot = 0;
+      state.lastStepTabSlot = null;
+      stopKeepalive();
+      await persistState();
+      return { error: 'This page cannot be recorded. Open an http(s) page and try again.' };
+    }
+
+    console.log(`[Trigger] Recording started on tab ${state.activeTabId}`);
+    return { status: 'recording', workflowId: state.workflowId, tabCount: 1 };
   },
 
   'STOP_RECORDING': async () => {
+    if (state.mode !== 'recording' || !state.workflowId) {
+      return { error: 'not recording' };
+    }
+
     console.log('[Trigger] Stopping recording. Recorded', state.steps.length, 'steps');
+    const tabs = buildTabManifest();
     const workflow = {
       id: state.workflowId,
       name: `Workflow ${new Date().toLocaleString()}`,
-      startUrl: state.steps[0]?.url ?? '',
+      startUrl: tabs[0]?.url || state.steps[0]?.url || '',
       steps: state.steps,
+      tabs,
+      tabCount: tabs.length,
+      multiTab: tabs.length > 1,
       createdAt: Date.now(),
     };
 
@@ -576,6 +926,7 @@ const messageHandlers = {
     await saveWorkflow(workflow);
 
     // Mirror to backend to generate a real shareable link.
+    let shareError = null;
     try {
       const remote = await uploadWorkflowRemote(workflow);
       if (remote && remote.shareUrl) {
@@ -584,27 +935,25 @@ const messageHandlers = {
         await saveWorkflow(workflow);
       }
     } catch (err) {
+      shareError = err.message;
       console.warn('[Trigger] Remote upload failed, keeping local copy only:', err.message);
       await enqueueUploadRetry(workflow, err.message);
     }
 
-    // Save tab ID before clearing state
-    const tabId = state.activeTabId;
+    // Deactivate the recorder in every tab this workflow touched.
+    await stopRecorderInAllTabs();
 
     state.mode = 'idle';
     state.activeTabId = null;
+    state.recordedTabs = {};
+    state.closedTabs = {};
+    state.nextTabSlot = 0;
+    state.lastStepTabSlot = null;
     state.replaySessionStatus = 'idle';
     stopKeepalive();
     await persistState();
 
-    // Notify content script to deactivate recorder
-    if (tabId) {
-      _browser.tabs.sendMessage(tabId, {
-        type: 'RECORDER_STOP',
-      }).catch(() => {}); // tab might be closed
-    }
-
-    return { status: 'stopped', workflow };
+    return { status: 'stopped', workflow, shareUrl: workflow.shareUrl || null, shareError };
   },
 
   'RECORD_STEP': async (msg, sender) => {
@@ -613,18 +962,46 @@ const messageHandlers = {
       return { error: 'not recording' };
     }
 
+    const senderTab = sender.tab;
+    if (!senderTab || typeof senderTab.id !== 'number') {
+      return { error: 'step has no originating tab' };
+    }
+
+    // A tab can start emitting steps before its lifecycle event landed
+    // (e.g. target=_blank opened and clicked faster than onUpdated fired).
+    let tabEntry = state.recordedTabs[senderTab.id];
+    if (!tabEntry) {
+      tabEntry = await registerRecordingTab(senderTab, senderTab.openerTabId);
+      if (!tabEntry) return { error: 'tab is not recordable' };
+    }
+
+    // Emit an explicit tab_switch whenever the acting tab changes, so replay
+    // knows to focus a different tab rather than replaying into the wrong one.
+    if (state.lastStepTabSlot !== null && state.lastStepTabSlot !== tabEntry.slot) {
+      state.steps.push({
+        index: state.steps.length,
+        timestamp: Date.now(),
+        type: 'tab_switch',
+        tabSlot: tabEntry.slot,
+        fromTabSlot: state.lastStepTabSlot,
+        url: senderTab.url ?? '',
+      });
+    }
+
     const step = {
       index: state.steps.length,
       timestamp: Date.now(),
-      url: sender.tab?.url ?? '',
+      url: senderTab.url ?? '',
+      tabSlot: tabEntry.slot,
       ...msg.step,
     };
 
     console.log('[Trigger] Recorded step:', step);
     state.steps.push(step);
+    state.lastStepTabSlot = tabEntry.slot;
     await persistState();
 
-    return { status: 'recorded', index: step.index };
+    return { status: 'recorded', index: step.index, tabSlot: tabEntry.slot };
   },
 
   // ── Replay ──
@@ -642,7 +1019,11 @@ const messageHandlers = {
     state.credentialPrompts = credentialMetadata.prompts;
     state.sensitiveStepKeys = credentialMetadata.sensitiveStepKeys;
     state.credentialsReady = state.credentialPrompts.length === 0;
-    replayFreshnessCheck.sampleSteps = buildReplayFreshnessSample(workflow.steps);
+    // Drift is assessed on the starting tab, so sample only that tab's steps.
+    const startingSlot = Array.isArray(workflow.tabs) && workflow.tabs.length > 0
+      ? workflow.tabs[0].slot
+      : 0;
+    replayFreshnessCheck.sampleSteps = buildReplayFreshnessSample(workflow.steps, startingSlot);
     replayFreshnessCheck.pending = replayFreshnessCheck.sampleSteps.length > 0;
     state.replaySessionStatus = 'active';
     state.stepRetries = {};
@@ -652,13 +1033,24 @@ const messageHandlers = {
     startKeepalive();
     await persistState();
 
+    // Rebuild the recorded tab topology as replay progresses.
+    state.replayTabs = {};
+    state.replayTabManifest = Array.isArray(workflow.tabs) ? workflow.tabs : [];
+
     // Open starting URL in a new tab
     const tab = await _browser.tabs.create({ url: workflow.startUrl });
     state.activeTabId = tab.id;
+    // The first recorded tab (slot 0) maps to the tab we just opened.
+    const firstSlot = state.replayTabManifest[0]?.slot ?? 0;
+    state.replayTabs[firstSlot] = tab.id;
     await persistState();
 
     // Content script will request first step when ready
-    return { status: 'replaying', totalSteps: workflow.steps.length };
+    return {
+      status: 'replaying',
+      totalSteps: workflow.steps.length,
+      tabCount: state.replayTabManifest.length || 1,
+    };
   },
 
   'START_REPLAY_INLINE': async (msg, sender) => {
@@ -678,11 +1070,19 @@ const messageHandlers = {
     state.credentialPrompts = credentialMetadata.prompts;
     state.sensitiveStepKeys = credentialMetadata.sensitiveStepKeys;
     state.credentialsReady = state.credentialPrompts.length === 0;
-    replayFreshnessCheck.sampleSteps = buildReplayFreshnessSample(workflow.steps);
+    // Drift is assessed on the starting tab, so sample only that tab's steps.
+    const startingSlot = Array.isArray(workflow.tabs) && workflow.tabs.length > 0
+      ? workflow.tabs[0].slot
+      : 0;
+    replayFreshnessCheck.sampleSteps = buildReplayFreshnessSample(workflow.steps, startingSlot);
     replayFreshnessCheck.pending = replayFreshnessCheck.sampleSteps.length > 0;
     state.replaySessionStatus = 'active';
     state.stepRetries = {};
     state.activeTabId = sender.tab.id;
+    // Share-link replay runs in the tab the viewer page is open in, so that
+    // tab becomes the workflow's first slot. Later slots are opened on demand.
+    state.replayTabManifest = Array.isArray(workflow.tabs) ? workflow.tabs : [];
+    state.replayTabs = { [state.replayTabManifest[0]?.slot ?? 0]: sender.tab.id };
     state.lastReplayHeartbeatAt = Date.now();
     state.lastReplayProgressAt = Date.now();
     state.recoveryAttempts = 0;
@@ -701,14 +1101,9 @@ const messageHandlers = {
       };
     }
 
-    const firstStep = state.steps[0];
-    if (!firstStep) return { type: 'REPLAY_COMPLETE' };
-    return {
-      type: 'EXECUTE_STEP',
-      step: prepareStepForExecution(firstStep, 0),
-      index: 0,
-      total: state.steps.length,
-    };
+    // Routes through the shared resolver so a workflow starting with a tab
+    // step is handled in the background rather than sent to the page.
+    return await resolveNextReplayResponse();
   },
 
   'REPLAY_READY': async (msg, sender) => {
@@ -740,7 +1135,7 @@ const messageHandlers = {
       };
     }
 
-    return getReplayResponseForCurrentIndex();
+    return await resolveNextReplayResponse();
   },
 
   'DOM_DRIFT_DECISION': async (msg, sender) => {
@@ -922,6 +1317,31 @@ const messageHandlers = {
     return await getAllWorkflows();
   },
 
+  // Mints (or re-mints) a backend share link for an already-saved workflow.
+  // Lets the popup recover from a failed upload without re-recording.
+  'SHARE_WORKFLOW': async (msg) => {
+    const workflow = await loadWorkflow(msg.workflowId);
+    if (!workflow) return { error: 'workflow not found' };
+
+    if (workflow.shareUrl && !msg.force) {
+      return { shareUrl: workflow.shareUrl, slug: workflow.slug, cached: true };
+    }
+
+    try {
+      const remote = await uploadWorkflowRemote(workflow);
+      if (!remote || !remote.shareUrl) {
+        return { error: 'backend did not return a share URL' };
+      }
+      workflow.shareUrl = remote.shareUrl;
+      workflow.slug = remote.slug;
+      await saveWorkflow(workflow);
+      return { shareUrl: remote.shareUrl, slug: remote.slug, cached: false };
+    } catch (err) {
+      await enqueueUploadRetry(workflow, err.message);
+      return { error: err.message };
+    }
+  },
+
   'DELETE_WORKFLOW': async (msg) => {
     await deleteWorkflow(msg.workflowId);
     return { status: 'deleted' };
@@ -1020,15 +1440,10 @@ _browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
 });
 
 _browser.tabs.onRemoved.addListener((tabId) => {
-  if (state.mode === 'replaying' && tabId === state.activeTabId) {
-    abortReplaySession('tab_closed', 'Replay tab was closed during active session').catch((err) => {
-      console.warn('[Trigger] Failed to abort replay after tab removal:', err.message);
-    });
+  if (state.mode === 'recording') {
+    forgetRecordedTab(tabId);
+    return;
   }
-});
-});
-
-_browser.tabs.onRemoved.addListener((tabId) => {
   if (state.mode === 'replaying' && tabId === state.activeTabId) {
     abortReplaySession('tab_closed', 'Replay tab was closed during active session').catch((err) => {
       console.warn('[Trigger] Failed to abort replay after tab removal:', err.message);
